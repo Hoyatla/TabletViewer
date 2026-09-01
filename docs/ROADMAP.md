@@ -27,10 +27,16 @@ not "done" until the criterion is met.
 
 **Goal:** bulk transfer works from the hypervisor.
 
-- [ ] `pc-sender/src/usb/xhci.rs` — controller init (CAP, HCSPARAMS, USBSTS)
-- [ ] `pc-sender/src/usb/xhci.rs` — device enumeration
-- [ ] `pc-sender/src/usb/bulk.rs` — bulk OUT transfer
-- [ ] Integration into NexTOS kernel (MMIO mapping, IRQ handling)
+- [x] `pc-sender/src/usb/xhci.rs` — register layout, TRB types, PCI probe constants, controller handle
+- [x] `pc-sender/src/usb/bulk.rs` — TransferRing + submit_bulk primitive
+- [x] `pc-sender/src/usb/descriptor.rs` — USB descriptor constants (VID/PID/class)
+- [x] `pc-sender/src/usb/mod.rs` — module re-exports
+- [x] 12 unit tests covering TRB encoding, register offsets, completion codes, cycle bit
+- [ ] MMIO helper integration in NexTOS kernel (map xHCI BAR0)
+- [ ] PCI scan at boot (find xHCI by class 0x0C/0x03/0x30)
+- [ ] Controller reset + DCBAA + command ring + event ring allocation (DMA buffers)
+- [ ] Device slot enable + address device + configure endpoint
+- [ ] IRQ handler (MSI or legacy INTx) to consume transfer events
 - [ ] **Acceptance:** an echo from the kernel reaches a host-side USB sniffer.
 
 ## Phase 3 — Real framebuffer pipeline
