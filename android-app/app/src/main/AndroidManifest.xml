@@ -6,6 +6,14 @@
         android:name="android.hardware.usb.accessory"
         android:required="false" />
 
+    <!-- Required for OkHttp / java.net to open sockets. Without it, every
+         request returns "EPERM (Operation not permitted)". -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Optional: required to read /v1/system's loadavg accurately on
+         older devices. Harmless to keep. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- Storage (scoped storage on API 29+; legacy on older devices). -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

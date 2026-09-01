@@ -6,6 +6,18 @@ pc-agent/Cargo.lock
 # Runtime artifacts of pc-agent (started during local testing)
 pc-agent/agent.out
 pc-agent/agent.err
+pc-agent/agent.log
+pc-agent/agent.log.err
+
+# Local debug/diagnostic artifacts from adb-driven sessions
+# (uiautomator dumps, screencap PNGs, etc.)
+android-app/ui*.xml
+android-app/after-*.png
+android-app/before-*.png
+android-app/connected*.png
+android-app/discover*.png
+android-app/launched*.png
+android-app/screenshot*.png
 # Android release signing material (do NOT commit a real keystore)
 android-app/app/release.keystore
 android-app/app/*.keystore

@@ -74,9 +74,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_file).setOnClickListener { onFile() }
         discoverButton.setOnClickListener { onDiscover() }
 
-        // Sensible default: the agent defaults to 127.0.0.1:8765 (PC mode)
-        // or whatever is on the LAN. User can edit.
-        urlInput.setText("http://192.168.1.10:8765")
+        // Sensible default. The PC IP will vary by network; we use the
+        // address Discover would auto-fill, but Discover is still the
+        // preferred path (mDNS handles IP changes).
+        urlInput.setText("http://192.168.1.103:8765")
         updateStatus("Not connected. Pick a transport and tap Connect.")
         setActionsEnabled(false)
     }
