@@ -1,0 +1,22 @@
+[package]
+name = "screen-viewer-sender"
+version = "0.1.0"
+edition = "2021"
+description = "Framebuffer streaming sender for ScreenViewerOnTablet (NexTOS integration)"
+authors = ["Charles Aebi"]
+license = "TBD"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+# Enable when integrating into NexTOS kernel (no_std + no_alloc)
+# baremetal = []
+
+[dependencies]
+bitflags = { version = "2.4", default-features = false }
+crc32fast = { version = "1.3", default-features = false }
+
+[dev-dependencies]
+proptest = "1.4"

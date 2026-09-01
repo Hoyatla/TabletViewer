@@ -1,0 +1,36 @@
+# Rust
+pc-sender/target/
+pc-sender/Cargo.lock
+
+# Android / Gradle
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/.idea/
+android-app/captures/
+android-app/recordings/
+android-app/*.iml
+android-app/app/*.iml
+*.apk
+*.aab
+
+# Python
+pc-mcp-bridge/__pycache__/
+pc-mcp-bridge/*.egg-info/
+pc-mcp-bridge/.venv/
+pc-mcp-bridge/dist/
+pc-mcp-bridge/build/
+pc-mcp-bridge/.env
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
