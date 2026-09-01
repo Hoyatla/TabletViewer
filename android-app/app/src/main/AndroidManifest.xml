@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- USB host capability: required, the app is useless without it. -->
+    <!-- USB accessory support (tablet = device, PC = host with bridge) -->
     <uses-feature
-        android:name="android.hardware.usb.host"
-        android:required="true" />
+        android:name="android.hardware.usb.accessory"
+        android:required="false" />
 
     <!-- Storage (scoped storage on API 29+; legacy on older devices). -->
     <uses-permission
@@ -13,9 +13,6 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-
-    <!-- For the HTTP/WS server we only bind to localhost; no INTERNET needed.
-         adb reverse forwards the port to the PC. -->
 
     <application
         android:allowBackup="false"

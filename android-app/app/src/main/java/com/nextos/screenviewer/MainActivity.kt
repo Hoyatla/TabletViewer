@@ -5,10 +5,12 @@ import android.os.Bundle
 import android.text.InputType
 import android.util.Log
 import android.view.View
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -18,20 +20,31 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Main entry point. Hosts a small UI to talk to a `pc-agent` over LAN:
- *   - Enter the PC's URL (e.g. http://192.168.1.42:8765).
- *   - Tap "Connect" to ping + fetch system info.
- *   - Tap the action buttons to invoke the matching endpoint.
- *   - Screenshots appear in the ImageView; other results print to the
- *     text area.
+ * Main entry point. Hosts a small UI to talk to a `pc-agent` either over
+ * the LAN (auto-discovered or manual URL) or over USB (accessory mode +
+ * a PC-side bridge binary).
+ *
+ *  - Pick a transport in the spinner (LAN / USB).
+ *  - LAN: optionally tap "Discover" to mDNS-browse for `_pcagent._tcp.`,
+ *    then tap "Connect" to ping + fetch system info. The URL field can
+ *    also be edited manually.
+ *  - USB: tap "Connect" to request the accessory permission and open the
+ *    bridge. Without the PC bridge running, all calls except `ping` will
+ *    throw — the bridge is what forwards bulk ↔ localhost:8766.
+ *  - Action buttons invoke the matching endpoint on whichever API is
+ *    currently connected. Screenshots appear in the ImageView; other
+ *    results print to the text area.
  */
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var transportSpinner: Spinner
+    private lateinit var discoverButton: Button
     private lateinit var urlInput: EditText
     private lateinit var statusText: TextView
     private lateinit var outputText: TextView
     private lateinit var screenshotView: ImageView
-    private lateinit var actionBar: LinearLayout
+
+    private val usbApi by lazy { UsbDebugApi(this) }
 
     private var api: DebugApi? = null
 
@@ -39,11 +52,18 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        transportSpinner = findViewById(R.id.transport_spinner)
+        discoverButton = findViewById(R.id.btn_discover)
         urlInput = findViewById(R.id.url_input)
         statusText = findViewById(R.id.status_text)
         outputText = findViewById(R.id.output_text)
         screenshotView = findViewById(R.id.screenshot_view)
-        actionBar = findViewById(R.id.action_bar)
+
+        // Transport selector.
+        val transports = arrayOf("LAN (auto-discover or type URL)", "USB (accessory)")
+        transportSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, transports,
+        )
 
         // Wire buttons.
         findViewById<Button>(R.id.btn_connect).setOnClickListener { onConnect() }
@@ -52,15 +72,29 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_screenshot).setOnClickListener { onScreenshot() }
         findViewById<Button>(R.id.btn_log).setOnClickListener { onLog() }
         findViewById<Button>(R.id.btn_file).setOnClickListener { onFile() }
+        discoverButton.setOnClickListener { onDiscover() }
 
         // Sensible default: the agent defaults to 127.0.0.1:8765 (PC mode)
         // or whatever is on the LAN. User can edit.
         urlInput.setText("http://192.168.1.10:8765")
-        updateStatus("Not connected. Enter the PC agent URL and tap Connect.")
+        updateStatus("Not connected. Pick a transport and tap Connect.")
         setActionsEnabled(false)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        runCatching { usbApi.close() }
+    }
+
     private fun onConnect() {
+        when (transportSpinner.selectedItemPosition) {
+            0 -> connectLan()
+            1 -> connectUsb()
+            else -> Toast.makeText(this, "Unknown transport", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun connectLan() {
         val url = urlInput.text.toString().trim()
         if (url.isEmpty()) {
             Toast.makeText(this, "URL is required", Toast.LENGTH_SHORT).show()
@@ -86,6 +120,62 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "connect failed", e)
                 api = null
                 updateStatus("Connect failed: ${e.message ?: e::class.simpleName}")
+            }
+        }
+    }
+
+    private fun connectUsb() {
+        updateStatus("Opening USB accessory...")
+        setActionsEnabled(false)
+        try {
+            usbApi.openIfNeeded()
+            api = usbApi
+            updateStatus(
+                "USB accessory open. Only ping() works without the PC bridge " +
+                    "(see docs/USB.md)."
+            )
+            // Probe with a ping so the user gets immediate feedback.
+            lifecycleScope.launch {
+                try {
+                    val pong = usbApi.ping()
+                    updateStatus("USB: $pong")
+                    setActionsEnabled(true)
+                } catch (e: Exception) {
+                    Log.e(TAG, "USB ping failed", e)
+                    api = null
+                    updateStatus("USB ping failed: ${e.message ?: e::class.simpleName}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "USB open failed", e)
+            api = null
+            updateStatus("USB open failed: ${e.message ?: e::class.simpleName}")
+        }
+    }
+
+    private fun onDiscover() {
+        updateStatus("Discovering pc-agent instances on the LAN...")
+        discoverButton.isEnabled = false
+        lifecycleScope.launch {
+            try {
+                val agents = NetworkDiscovery.discover(this@MainActivity, timeoutMs = 4000)
+                if (agents.isEmpty()) {
+                    updateStatus("No pc-agent found. You can still type the URL manually.")
+                } else {
+                    val first = agents.first()
+                    transportSpinner.setSelection(0) // LAN
+                    urlInput.setText(first.baseUrl)
+                    val others = if (agents.size > 1) " (+${agents.size - 1} more)" else ""
+                    updateStatus(
+                        "Found ${agents.size} agent(s)$others. " +
+                            "Using ${first.name} → ${first.baseUrl}. Tap Connect."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "discover failed", e)
+                updateStatus("Discover failed: ${e.message ?: e::class.simpleName}")
+            } finally {
+                discoverButton.isEnabled = true
             }
         }
     }
@@ -215,9 +305,6 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null)
             .create()
         dialog.show()
-        // Wait for the user to dismiss — but since dialog is modal, we
-        // can't await here. Workaround: ask the user, then read the
-        // tag on next call. Simpler: use a blocking approach.
         val result = input.tag as? String
         return if (result.isNullOrBlank()) null else result
     }

@@ -5,10 +5,29 @@
     android:orientation="vertical"
     android:padding="12dp">
 
-    <!-- Server URL + Connect button -->
+    <!-- Transport selector + Discover button + URL field -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Spinner
+            android:id="@+id/transport_spinner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1" />
+
+        <Button
+            android:id="@+id/btn_discover"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Discover" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
         android:orientation="horizontal">
 
         <EditText
@@ -41,7 +60,6 @@
 
     <!-- Action buttons row -->
     <LinearLayout
-        android:id="@+id/action_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
