@@ -1,6 +1,11 @@
 # Rust
 pc-sender/target/
 pc-sender/Cargo.lock
+pc-agent/target/
+pc-agent/Cargo.lock
+# Runtime artifacts of pc-agent (started during local testing)
+pc-agent/agent.out
+pc-agent/agent.err
 
 # Android / Gradle
 android-app/.gradle/
@@ -40,3 +45,4 @@ desktop.ini
 *~
 .vscode/
 .idea/
+.run/

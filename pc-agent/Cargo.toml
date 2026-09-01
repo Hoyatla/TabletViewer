@@ -1,0 +1,60 @@
+[package]
+name = "pc-agent"
+version = "0.1.0"
+edition = "2021"
+description = "PC-side debug agent for the ScreenViewerOnTablet Android app"
+authors = ["Charles Aebi"]
+license = "TBD"
+
+[[bin]]
+name = "pc-agent"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1.40", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+hyper = "1.4"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# System info
+sysinfo = "0.30"
+
+# Screenshot capture
+screenshots = "0.8"
+# Direct dep for the RgbaImage type returned by screenshots::Screen::capture
+image = "0.24"
+
+# CLI args
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+anyhow = "1.0"
+thiserror = "1.0"
+bytes = "1.7"
+base64 = "0.22"
+parking_lot = "0.12"
+
+# mDNS service discovery is left out for now. We rely on manual IP entry
+# on the tablet. To re-enable, add `libmdns` to deps and uncomment the
+# feature block below.
+#
+# [features]
+# default = []
+# mdns = ["dep:libmdns"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-test = "0.4"
