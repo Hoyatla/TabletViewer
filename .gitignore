@@ -16,6 +16,9 @@ android-app/app/*.iml
 *.aab
 
 # Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 pc-mcp-bridge/__pycache__/
 pc-mcp-bridge/*.egg-info/
 pc-mcp-bridge/.venv/

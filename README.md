@@ -16,8 +16,19 @@ ScreenViewerOnTablet/
 ├── pc-mcp-bridge/     Python MCP server — proxies to the Android app over HTTP
 ├── protocol/          Binary spec of USB packets
 ├── docs/              Architecture, roadmap, protocol, decisions
-└── tools/             Mock sender/receiver for testing without hardware
+└── tools/             Python reference impl + mock sender/receiver for testing without hardware
 ```
+
+## Quick test (no hardware)
+
+```bash
+cd tools
+python test_roundtrip.py          # 10 unit tests
+python mock_sender.py --fps 10 | python mock_receiver.py
+# -> PNG frames in ./received_frames/
+```
+
+Requires Python 3.10+ and Pillow (`pip install pillow`).
 
 ## Prerequisites
 

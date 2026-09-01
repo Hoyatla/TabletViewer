@@ -7,13 +7,17 @@ not "done" until the criterion is met.
 
 **Goal:** validate the USB packet format end-to-end without real hardware.
 
-- [ ] `docs/PROTOCOL.md` — packet format spec ✅
-- [ ] `pc-sender/src/enc.rs` — packet encoder
-- [ ] `pc-sender/src/enc.rs` — unit tests (header size, CRC32, magic)
-- [ ] `tools/mock_sender.py` — emits fake frames over TCP/serial
-- [ ] `android-app/.../ProtocolParser.kt` — packet parser
-- [ ] `android-app/.../StreamReceiver.kt` — minimal listener (stub)
-- [ ] **Acceptance:** a static frame travels from sender to receiver and renders correctly.
+- [x] `docs/PROTOCOL.md` — packet format spec
+- [x] `pc-sender/src/enc.rs` — packet encoder (6 unit tests, awaiting `cargo test` on host)
+- [x] `tools/protocol_py.py` — Python reference implementation of the encoder/decoder
+- [x] `tools/mock_sender.py` — emits fake frames to stdout/file
+- [x] `tools/mock_receiver.py` — decodes frames to PNG
+- [x] `tools/test_roundtrip.py` — 10 tests pass (roundtrip, CRC32 detection, bad magic, bad version, truncated, reference packet)
+- [ ] `android-app/.../ProtocolParser.kt` — packet parser (Kotlin port of `protocol_py.py`)
+- [ ] `android-app/.../StreamReceiver.kt` — minimal USB listener (stub)
+- [x] **Acceptance:** a static frame travels from sender to receiver and renders correctly. ✅
+  - Verified with `tools/mock_sender.py | tools/mock_receiver.py` (3 frames, 1280×720, 5.5 MB).
+  - Reference packet bytes for input `(frame_id=0x12345678, w=258, h=772, fmt=RGB565, key=True, payload=b"hello")` are documented in `tools/test_roundtrip.py::test_reference_packet` and can be cross-checked against the Rust `cargo test` output.
 
 ## Phase 2 — xHCI driver in NexTOS
 
