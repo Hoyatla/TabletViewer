@@ -1,121 +1,183 @@
 # Architecture
 
-## High-level diagram
+## High-level
+
+The project is a **client/server debug API**, not a streamer.
+
+- **`pc-agent`** is a long-running HTTP server on the PC. It exposes a
+  small REST/JSON API and is also a screenshotter.
+- **`android-app`** is a thin Kotlin client. It calls the API over LAN
+  (HTTP) or USB (accessory + a small PC bridge), and renders the
+  results.
+- The two endpoints can talk either directly over TCP, or over USB bulk
+  with a PC-side bridge in the middle.
 
 ```
-┌────────────────────────┐                  ┌────────────────────────────────┐
-│   NexTOS (PC)          │                  │   Galaxy Tab S9 FE (rooted)    │
-│                        │  USB bulk IN     │                                │
-│  ┌──────────────────┐  │  ──────────────► │  ┌──────────────────────────┐  │
-│  │ Framebuffer      │  │                  │  │ StreamReceiver           │  │
-│  │   reader         │  │                  │  └────────────┬─────────────┘  │
-│  └────────┬─────────┘  │                  │               │                │
-│           ▼            │                  │   ┌───────────▼─────────────┐  │
-│  ┌──────────────────┐  │                  │   │ Live display (10 fps)   │  │
-│  │ Packet encoder   │  │                  │   │ Recorder (PNG seq)      │  │
-│  │   (enc.rs)       │  │                  │   │ HTTP/WS server :8765    │  │
-│  └────────┬─────────┘  │                  │   └───────────┬─────────────┘  │
-│           ▼            │                  │               │                │
-│  ┌──────────────────┐  │                  │               │ HTTP           │
-│  │ xHCI driver      │  │                  │   ┌───────────▼─────────────┐  │
-│  │   (usb/xhci.rs)  │  │                  │   │ MCP server (PC, Python) │  │
-│  └──────────────────┘  │                  │   └───────────┬─────────────┘  │
-│                        │                  │               │ MCP stdio      │
-└────────────────────────┘                  │   ┌───────────▼─────────────┐  │
-                                            │   │ LLM (Mavis / MiniMax)   │  │
-                                            │   └─────────────────────────┘  │
-                                            │                                │
-                                            │  ┌─────────────────────────┐  │
-                                            │  │ ScreenCapture           │  │
-                                            │  │   mmap(/dev/graphics/   │  │
-                                            │  │        fb0)             │  │
-                                            │  └────────────┬────────────┘  │
-                                            │               ▼                │
-                                            │  /storage/.../captures/*.png  │
-                                            └────────────────────────────────┘
+                         (LAN: HTTP/JSON)
+   ┌────────────────┐                                  ┌──────────────────────┐
+   │  android-app   │ ───────── TCP 0.0.0.0:8765 ────► │      pc-agent        │
+   │  (Kotlin UI)   │ ◄────────── responses ───────── │  (Rust HTTP server)  │
+   └────────────────┘                                  │                      │
+            │                                          │  /v1/ping            │
+            │  mDNS browse _pcagent._tcp.local.        │  /v1/system          │
+            │                                          │  /v1/screenshot      │
+            │                                          │  /v1/processes       │
+            │                                          │  /v1/log             │
+            │                                          │  /v1/file            │
+            │                                          └──────────────────────┘
+            │
+            │  (USB accessory + bridge, optional)
+            │         bulk IN/OUT
+            ▼
+   ┌────────────────┐                                  ┌──────────────────────┐
+   │  UsbDebugApi   │ ── HTTP/JSON on 127.0.0.1:8766 ─►│   pc-bridge (Rust,   │
+   │  (UsbAccessory)│ ◄───────── responses ────────── │   libusb, ~100 LoC)  │
+   └────────────────┘                                  └──────────┬───────────┘
+                                                                 │ HTTP/JSON
+                                                                 ▼
+                                                      ┌──────────────────────┐
+                                                      │      pc-agent        │
+                                                      │   (127.0.0.1:8765)   │
+                                                      └──────────────────────┘
 ```
+
+The user picks the transport in the app (LAN spinner entry or USB
+spinner entry). The rest of the app does not care — both impls
+implement `DebugApi`.
 
 ## Components
 
-### `pc-sender/` — Rust `no_std` crate
+### `pc-agent/` — Rust crate, lib + bin
 
-Integrated into the NexTOS kernel. Provides:
+Path: `pc-agent/`. Toolchain: `stable-x86_64-pc-windows-gnu` (no MSVC
+build tools needed).
 
-- `fb::read()` — read current framebuffer (GOP or kernel linear FB).
-- `enc::encode(frame_id, info, payload)` — produce wire packet (header + CRC32).
-- `usb::xhci::init()` — initialize xHCI controller.
-- `usb::bulk::send(packet)` — send packet over bulk endpoint.
+- `src/lib.rs` — `Cli` (clap, env-overridable: `PC_AGENT_PORT`,
+  `PC_AGENT_BIND`, `PC_AGENT_TOKEN`, `PC_AGENT_ROOTS`), `AppState`
+  (token, allowed roots, cached `sysinfo::System`, cached `Capturer`),
+  `build_router(state)` (the public router — used by integration tests
+  too), `run(cli)` (initializes tracing, builds state, registers mDNS,
+  binds TCP, serves).
+- `src/handlers.rs` — six `pub async fn` handlers, one per endpoint,
+  plus `check_auth(&state, &headers)` and `path_allowed(&state, &path)`.
+  `/v1/screenshot` offloads the capture to `spawn_blocking` and
+  encodes to PNG with `image::write_to` over a `Cursor<Vec<u8>>`.
+- `src/capture.rs` — `Capturer::new()` and `grab_primary() ->
+  image::RgbaImage`. Uses the `screenshots 0.8` crate, which returns
+  RGBA images directly.
+- `src/proc.rs` — `ProcessInfo` + `collect(&System)`. Local module is
+  named `proc` (NOT `sysinfo`) to avoid shadowing the external
+  `sysinfo` crate in the same scope.
+- `src/discovery.rs` — `register(port, instance) -> MdnsHandle` and
+  `discover(timeout) -> Vec<(name, ip, port)>` over the `mdns-sd 0.11`
+  crate. TXT records: `version`, `platform`, `api=v1`.
+- `src/main.rs` — 5-line wrapper that parses `Cli` and calls
+  `pc_agent::run(cli).await`.
+- `tests/integration.rs` — 9 in-process tests using
+  `tower::ServiceExt::oneshot` on `build_router` (no real socket):
+  ping, system shape, processes, screenshot (200 on real display / 503
+  on headless), file read, log tail, auth missing 401, auth valid
+  accepted, roots forbidden.
 
-### `android-app/` — Kotlin (Android 8.0+)
+### `android-app/` — Kotlin (Android 8.0+, `compileSdk = 35`)
 
-Provides:
+- `DebugApi.kt` — interface with six `suspend` methods + `SortBy` enum.
+- `LanDebugApi.kt` — OkHttp 4.12, `org.json` for parsing, timeouts
+  5/30/10 s, bearer token via `Authorization: Bearer`.
+- `UsbDebugApi.kt` — `UsbManager` + `UsbAccessory`, with permission
+  request via `PendingIntent.getBroadcast`. Opens the accessory, gets
+  a `ParcelFileDescriptor`. Without the PC bridge, only `ping()` is
+  usable (raw HTTP over bulk for a smoke test); the other five methods
+  throw `UnsupportedOperationException` with a message pointing to the
+  bridge docs.
+- `NetworkDiscovery.kt` — `NsdManager` browse for `_pcagent._tcp.`
+  with a 4 s timeout. Returns `List<DiscoveredAgent>` with
+  `name/host/port`. Resolved IPs come from `NsdServiceInfo.host`.
+- `MainActivity.kt` — `AppCompatActivity`. Top bar: `transportSpinner`
+  (LAN / USB) + `Discover` button. Second row: URL `EditText` + Connect
+  button. Status line, action button rows (System, Proc, Screen, Log,
+  File), `ImageView` for the screenshot, scrolling text output. Connects
+  to a `DebugApi` (LAN or USB) and dispatches button presses through
+  it. `onDestroy()` closes the USB accessory.
+- `res/layout/activity_main.xml` — the layout above.
+- `app/build.gradle.kts` — `compileSdk = 35`, `minSdk = 26`,
+  `targetSdk = 35`. `signingConfigs.release` reads
+  `KEYSTORE_FILE`/`KEYSTORE_PASS`/`KEY_ALIAS`/`KEY_PASS` env vars
+  (fallback: `${rootDir}/app/release.keystore`, `changeit`/`changeit`,
+  `pcdebug`/`changeit`). `buildType.release` runs R8 (`isMinifyEnabled
+  = true`) + resource shrinker (`isShrinkResources = true`).
+- `app/src/main/AndroidManifest.xml` — `uses-feature
+  android.hardware.usb.accessory required="false"`, `usesCleartextTraffic
+  = "true"` (LAN HTTP), no required permissions beyond the legacy
+  `READ_/WRITE_EXTERNAL_STORAGE` up to API 28/32.
 
-- `StreamReceiver` — opens USB device, reads bulk IN, dispatches frames.
-- `LiveRenderer` — displays frames on a `SurfaceView` at the negotiated fps.
-- `Recorder` — saves incoming frames as a PNG sequence under `/storage/.../recordings/`.
-- `HttpServer` — exposes frames over `http://0.0.0.0:8765` (WebSocket).
-- `ScreenCapture` — reads `/dev/graphics/fb0` (root), returns RGBA pixels.
-- `ScreenCapture.save()` — writes PNG to `/storage/.../captures/`.
+## Data flow
 
-### `pc-mcp-bridge/` — Python MCP server
+### LAN (default)
 
-Runs on the **PC** (not the tablet). Proxies to the Android app over HTTP/WS.
-Exposes MCP tools:
+1. PC: `pc-agent --port 8765 --token s3cret --roots C:\\logs`.
+2. PC: agent binds `0.0.0.0:8765`, advertises `_pcagent._tcp.local.`,
+   prints `mDNS: discoverable as pcagent._pcagent._tcp.local.`.
+3. Tablet: user opens the app, taps `Discover`. `NetworkDiscovery`
+   browses for 4 s, resolves the service, fills the URL field with
+   `http://<ip>:8765`.
+4. Tablet: user taps `Connect`. `LanDebugApi.ping()` and `.system()`
+   run. Status line confirms the host.
+5. Tablet: tapping any action button calls the matching `DebugApi`
+   method, which issues an HTTP GET. Result renders in the
+   `outputText` (or the `screenshot_view` `ImageView` for `Screen`).
 
-- `screen.read()` → current frame as PNG bytes.
-- `screen.info()` → resolution, fps, format.
-- `screen.history(n)` → last N frames.
-- `screen.save(path)` → save current frame to PC disk.
+### USB accessory + bridge
 
-## Data flow (Mode 1)
+1. PC: `pc-agent` is running (the bridge is a thin shim that just
+   relays requests to it).
+2. PC: `pc-bridge` opens the Android accessory via libusb, claims the
+   bulk endpoints, and starts a TCP listener on `127.0.0.1:8766`.
+3. Tablet: user connects via USB, picks USB in the spinner, taps
+   `Connect`. `UsbDebugApi.openIfNeeded()` requests permission, opens
+   the accessory, gets the FD.
+4. Tablet: `LanDebugApi` (re-used) is configured against
+   `http://127.0.0.1:8766`; each HTTP call is wrapped in a bulk
+   round-trip by the bridge.
+5. Without the bridge, only `ping()` works (raw `GET /v1/ping HTTP/1.1`
+   is written to bulk OUT, response read from bulk IN). The other five
+   methods throw `UnsupportedOperationException` until the bridge
+   exists.
 
-1. NexTOS writes pixels to its framebuffer (GOP UEFI or kernel LFB).
-2. `pc-sender` reads the framebuffer.
-3. `pc-sender` encodes the frame as a packet (header + pixels + CRC32).
-4. `pc-sender` bulk-sends the packet over USB.
-5. Tablet `StreamReceiver` reads the packet.
-6. Packet decoded → RGB565 pixels.
-7. Three parallel consumers:
-   - `LiveRenderer` displays the frame at 10 fps.
-   - `Recorder` (if enabled) writes a PNG to `/storage/.../recordings/`.
-   - `HttpServer` pushes the frame to WebSocket clients (e.g. MCP bridge).
+## Storage layout
 
-## Data flow (Mode 2)
+There is no on-tablet storage of API results. The app keeps the
+in-memory `Bitmap` for the most recent screenshot, the text output,
+and the URL field. All process lists, log tails, and file reads are
+fetched on demand and displayed; nothing is persisted.
 
-1. User taps "Capture" in the app.
-2. `ScreenCapture` mmaps `/dev/graphics/fb0` (requires root).
-3. Pixels read directly from the kernel framebuffer (no `MediaProjection`).
-4. `ScreenCapture.save(path)` writes a PNG.
+## Configuration
 
-## Storage layout (on tablet)
+### Agent CLI
 
 ```
-/storage/emulated/0/Android/data/com.nextos.screenviewer/files/
-├── recordings/        # Mode 1: incoming stream
-│   └── 2026-09-01_14-30-00/
-│       ├── frame_000001.png
-│       ├── frame_000002.png
-│       └── ...
-├── captures/          # Mode 2: own-screen capture
-│   └── 2026-09-01_14-31-00.png
-└── logs/
-    └── screenviewer.log
+pc-agent [--port 8765] [--bind 0.0.0.0] [--token <s>] [--roots <dir1>,<dir2>]
 ```
 
-## Network setup for MCP
+Every flag also reads from an env var (`PC_AGENT_PORT`,
+`PC_AGENT_BIND`, `PC_AGENT_TOKEN`, `PC_AGENT_ROOTS`). `RUST_LOG`
+controls tracing verbosity.
 
-The tablet runs the HTTP/WS server on `0.0.0.0:8765`. To reach it from the PC:
+### Tablet URL field
 
-```powershell
-# Forward tablet's port 8765 to localhost
-adb reverse tcp:8765 tcp:8765
-
-# MCP bridge can then use http://127.0.0.1:8765
-```
+`http://<ip>:8765` — IP can be the LAN IP (auto-filled by Discover) or
+`127.0.0.1` when the PC bridge is in use.
 
 ## Constraints
 
-- USB-C 2.0 on Tab S9 FE → 480 Mbps theoretical, ~40 MB/s real.
-- 1080p RGB565 = 4.15 MB/frame → ~9.6 fps at the limit. Downscale to 720p recommended.
-- Root required for Mode 2.
-- No crypto on the screen stream (debug tool, not a control channel).
+- LAN mode: agent is open to anything on the network unless `--token`
+  is set. Use `--token` (or `--roots` for filesystem isolation) for any
+  setup that isn't a trusted local network.
+- USB mode on Tab S9 FE: USB-C 2.0, ~40 MB/s real throughput. Plenty
+  for the JSON payload sizes here (a `system` response is ~400 B, a
+  screenshot is whatever the screen produces).
+- mDNS only works inside a single LAN / multicast domain. It does not
+  cross routers. For WAN or restricted networks, the URL field accepts
+  the IP directly.
+- Screenshots require an active display. On a headless host the
+  endpoint returns `503 {"error":"no display available (headless?)"}`.
