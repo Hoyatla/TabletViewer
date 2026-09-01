@@ -12,6 +12,9 @@ android-app/captures/
 android-app/recordings/
 android-app/*.iml
 android-app/app/*.iml
+android-app/gradle/wrapper/gradle-wrapper.jar
+android-app/gradlew
+android-app/gradlew.bat
 *.apk
 *.aab
 
