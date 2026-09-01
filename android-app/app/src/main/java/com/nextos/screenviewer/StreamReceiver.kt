@@ -136,7 +136,7 @@ class StreamReceiver(private val context: Context) {
             }
 
             // Header complete. Determine payload length.
-            val payloadLen = readU32LE(buf, 16).toInt()
+            val payloadLen = ProtocolParser.peekPayloadLength(buf)
             val total = ProtocolParser.HEADER_LEN + payloadLen
             if (total > buf.size) {
                 Log.e(TAG, "Payload too big ($payloadLen bytes), resyncing on next NTSS")
@@ -147,7 +147,7 @@ class StreamReceiver(private val context: Context) {
 
             if (pos < total) {
                 val need = total - pos
-                val n = conn.bulkTransfer(ep, buf, pos, need, READ_TIMEOUT_MS)
+                val n: Int = conn.bulkTransfer(ep, buf, pos, need, READ_TIMEOUT_MS)
                 if (n <= 0) {
                     if (n < 0) {
                         try { Thread.sleep(5) } catch (_: InterruptedException) { return }

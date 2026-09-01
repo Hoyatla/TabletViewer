@@ -54,7 +54,7 @@ object ProtocolParser {
         val height      = readU16LE(packet, 8)
         val format      = readU16LE(packet, 10)
         val frameId     = readU32LE(packet, 12)
-        val payloadLen  = readU32LE(packet, 16)
+        val payloadLen  = readU32LE(packet, 16).toInt() // fits in Int for any sane packet
         val crc         = readU32LE(packet, 20)
 
         if (packet.size < HEADER_LEN + payloadLen) return null
@@ -73,6 +73,17 @@ object ProtocolParser {
         )
     }
 
+    /**
+     * Read just the payload-length field at offset 16 of a partially-
+     * received packet. Returns -1 if the buffer doesn't yet contain a full
+     * header. Exposed so the USB reader can know how many more bytes to
+     * fetch before it has a complete packet.
+     */
+    fun peekPayloadLength(buf: ByteArray): Int {
+        if (buf.size < HEADER_LEN) return -1
+        return readU32LE(buf, 16).toInt()
+    }
+
     private fun checkMagic(packet: ByteArray): Boolean {
         if (packet.size < 4) return false
         for (i in 0..3) {
@@ -81,11 +92,21 @@ object ProtocolParser {
         return true
     }
 
-    private fun readU16LE(buf: ByteArray, off: Int): Int =
+    /**
+     * Little-endian u16 at the given byte offset. Public so stream readers
+     * that pre-parse the header can reuse the same logic.
+     */
+    fun readU16LE(buf: ByteArray, off: Int): Int =
         (buf[off].toInt() and 0xFF) or
             ((buf[off + 1].toInt() and 0xFF) shl 8)
 
-    private fun readU32LE(buf: ByteArray, off: Int): Long =
+    /**
+     * Little-endian u32 at the given byte offset. Public for the same
+     * reason as [readU16LE]. Returns Long because the u32 bit pattern is
+     * often combined with u32 fields that could be misinterpreted as signed;
+     * using Long forces an explicit `.toInt()` at the call site.
+     */
+    fun readU32LE(buf: ByteArray, off: Int): Long =
         (buf[off].toInt() and 0xFF).toLong() or
             ((buf[off + 1].toInt() and 0xFF).toLong() shl 8) or
             ((buf[off + 2].toInt() and 0xFF).toLong() shl 16) or
