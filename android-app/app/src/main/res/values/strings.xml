@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ScreenViewerOnTablet</string>
+    <string name="initial_status">Ready. Plug the NexTOS device and tap Connect.</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="capture">Capture own screen</string>
+    <string name="capture_not_yet">Phase 4 — not implemented yet</string>
+</resources>
