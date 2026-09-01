@@ -6,6 +6,11 @@ pc-agent/Cargo.lock
 # Runtime artifacts of pc-agent (started during local testing)
 pc-agent/agent.out
 pc-agent/agent.err
+# Android release signing material (do NOT commit a real keystore)
+android-app/app/release.keystore
+android-app/app/*.keystore
+android-app/app/*.jks
+android-app/keystore.properties
 
 # Android / Gradle
 android-app/.gradle/

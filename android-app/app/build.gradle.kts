@@ -15,13 +15,38 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        // The release keystore. Generated locally; the file itself is
+        // .gitignored. For production, generate your own with
+        //   keytool -genkey -v -keystore release.keystore \
+        //           -keyalg RSA -keysize 2048 -validity 10000 -alias pcdebug
+        // and set KEYSTORE_FILE, KEYSTORE_PASS, KEY_ALIAS, KEY_PASS env vars
+        // (or hardcode the path below for dev convenience).
+        create("release") {
+            val ksFile = System.getenv("KEYSTORE_FILE")
+                ?: "${rootDir}/app/release.keystore"
+            val ksPass = System.getenv("KEYSTORE_PASS") ?: "changeit"
+            val keyAlias = System.getenv("KEY_ALIAS") ?: "pcdebug"
+            val keyPass = System.getenv("KEY_PASS") ?: "changeit"
+            storeFile = file(ksFile)
+            storePassword = ksPass
+            this.keyAlias = keyAlias
+            keyPassword = keyPass
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            // No special config; AGP applies the debug signing config by default.
         }
     }
 
