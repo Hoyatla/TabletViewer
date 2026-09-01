@@ -166,4 +166,41 @@ mod tests {
         let p = encode(0, info, &[]);
         assert_eq!(&p.header[16..20], &[0, 0, 0, 0]);
     }
+
+    #[test]
+    fn reference_packet_matches_python() {
+        // Cross-check with tools/test_roundtrip.py::test_reference_packet.
+        // If both tests pass, the Rust and Python encoders are bit-identical
+        // and the wire format is locked.
+        //
+        // Input:
+        //   frame_id   = 0x12345678
+        //   width      = 0x0102 (258)
+        //   height     = 0x0304 (772)
+        //   format     = 0 (RGB565)
+        //   is_key     = true
+        //   payload    = b"hello"  (5 bytes)
+        // CRC32(b"hello") = 0x3610A686
+        let info = FrameInfo {
+            width: 0x0102,
+            height: 0x0304,
+            format: PixelFormat::Rgb565,
+            frame_id: 0x12345678,
+            is_key_frame: true,
+        };
+        let p = encode(0x12345678, info, b"hello");
+
+        // Total: 24 (header) + 5 (payload) = 29 bytes
+        assert_eq!(p.header.len() + p.payload.len(), 29);
+        assert_eq!(&p.header[0..4], b"NTSS");
+        assert_eq!(p.header[4], 1); // version
+        assert_eq!(p.header[5], 1); // flags (key frame)
+        assert_eq!(&p.header[6..8], &[0x02, 0x01]); // width LE
+        assert_eq!(&p.header[8..10], &[0x04, 0x03]); // height LE
+        assert_eq!(&p.header[10..12], &[0x00, 0x00]); // format
+        assert_eq!(&p.header[12..16], &[0x78, 0x56, 0x34, 0x12]); // frame_id LE
+        assert_eq!(&p.header[16..20], &[0x05, 0x00, 0x00, 0x00]); // payload_len
+        assert_eq!(&p.header[20..24], &[0x86, 0xA6, 0x10, 0x36]); // CRC32 LE
+        assert_eq!(p.payload, b"hello");
+    }
 }
