@@ -40,11 +40,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
 
-    // USB device enumeration (no third-party: Android USB host API is in SDK)
-    // implementation("android.hardware.usb:usb:1.0")
-
-    // HTTP server (uncomment in Phase 5)
-    // implementation("org.nanohttpd:nanohttpd:2.3.1")
-    // implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
+    // HTTP client for talking to pc-agent over LAN
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
