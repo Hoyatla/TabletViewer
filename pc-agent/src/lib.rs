@@ -5,6 +5,7 @@
 //! without a real socket.
 
 pub mod capture;
+pub mod discovery;
 pub mod handlers;
 pub mod proc;
 
@@ -107,6 +108,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         .parse()
         .context("parse bind address")?;
     tracing::info!("pc-agent listening on http://{}", addr);
+
+    // Advertise over mDNS so the tablet can auto-discover this agent.
+    // Failure to advertise is non-fatal: the user can still type the URL.
+    match discovery::register(cli.port, None) {
+        Ok(h) => tracing::info!("mDNS: discoverable as {}", h.fullname),
+        Err(e) => tracing::warn!("mDNS registration failed: {e} (LAN discovery disabled)"),
+    }
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

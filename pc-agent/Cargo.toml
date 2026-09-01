@@ -44,6 +44,11 @@ bytes = "1.7"
 base64 = "0.22"
 parking_lot = "0.12"
 
+# mDNS service advertisement (zero-conf DNS) for auto-discovery
+# from the tablet. Pair with Android's NsdManager on the client side.
+mdns-sd = "0.11"
+hostname = "0.4"
+
 # mDNS service discovery is left out for now. We rely on manual IP entry
 # on the tablet. To re-enable, add `libmdns` to deps and uncomment the
 # feature block below.
