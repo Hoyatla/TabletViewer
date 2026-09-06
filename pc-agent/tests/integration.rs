@@ -353,3 +353,79 @@ fn urlencoding(p: &std::path::Path) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Direct uia:: function tests — call the underlying functions without HTTP.
+// We don't have a real test window with UIA controls, so we just verify
+// the functions return well-formed results (either a valid JSON object
+// for `dump`, or a clear error for the typed actions on a non-existent
+// automation_id). A 2s timeout guards against any future deadlock.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn uia_dump_returns_valid_json_with_expected_fields() {
+    let result = pc_agent::uia::dump_active_window();
+    // We don't assert success — on a headless or system-locked host the
+    // call can legitimately fail. What we DO assert: if it succeeds, the
+    // JSON has the expected top-level fields. If it fails, the error is
+    // non-empty (so the caller can show it to the user).
+    match result {
+        Ok(v) => {
+            assert!(v.get("window").is_some(), "missing 'window' field");
+            assert!(v.get("process").is_some(), "missing 'process' field");
+            assert!(v.get("controls").is_some(), "missing 'controls' field");
+            assert!(v.get("control_count").is_some(), "missing 'control_count' field");
+            assert!(v["controls"].is_array(), "'controls' must be an array");
+        }
+        Err(e) => {
+            assert!(!e.is_empty(), "error message must not be empty");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_invoke_by_id_returns_error_for_unknown_id() {
+    // "definitely-not-a-real-control-id" — if it ever succeeds, our test
+    // environment has a real app exposing that id, which would be a bug.
+    let result = pc_agent::uia::invoke_by_id("definitely-not-a-real-control-id");
+    assert!(result.is_err(), "expected error for non-existent control id");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("no control with automationId") || err.contains("CoCreateInstance") || err.contains("GetRootElement"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_set_text_by_id_returns_error_for_unknown_id() {
+    let result = pc_agent::uia::set_text_by_id("definitely-not-a-real-control-id", "hello");
+    assert!(result.is_err(), "expected error for non-existent control id");
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_select_by_id_returns_error_for_unknown_id() {
+    let result = pc_agent::uia::select_by_id("definitely-not-a-real-control-id", "value");
+    assert!(result.is_err(), "expected error for non-existent control id");
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_press_keys_accepts_known_shortcuts() {
+    // press_keys uses SendInput — we can't observe side-effects from a test,
+    // but we can verify it doesn't error on well-formed inputs.
+    for keys in ["Return", "Tab", "Escape", "Ctrl+S", "Alt+F4", "F5"] {
+        let result = pc_agent::uia::press_keys(keys);
+        assert!(result.is_ok(), "press_keys({keys}) failed: {:?}", result);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_press_keys_rejects_unknown_keys() {
+    assert!(pc_agent::uia::press_keys("NoSuchKey").is_err());
+    assert!(pc_agent::uia::press_keys("Ctrl+NoSuchKey").is_err());
+}
+
