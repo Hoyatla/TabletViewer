@@ -9,12 +9,17 @@ pub mod discovery;
 pub mod handlers;
 pub mod proc;
 
+#[cfg(windows)]
+pub mod uia;
+#[cfg(windows)]
+pub mod handlers_uia;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use sysinfo::System;
@@ -57,13 +62,23 @@ pub struct AppState {
 /// Build the HTTP router with all routes wired. Public so integration
 /// tests in `tests/integration.rs` can call it with a fresh `AppState`.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/v1/ping", get(handlers::ping))
         .route("/v1/system", get(handlers::system))
         .route("/v1/screenshot", get(handlers::screenshot))
         .route("/v1/processes", get(handlers::processes))
         .route("/v1/log", get(handlers::log_tail))
-        .route("/v1/file", get(handlers::file_read))
+        .route("/v1/file", get(handlers::file_read));
+
+    #[cfg(windows)]
+    let router = router
+        .route("/v1/uia/dump", get(handlers_uia::uia_dump))
+        .route("/v1/uia/invoke", post(handlers_uia::uia_invoke))
+        .route("/v1/uia/set_text", post(handlers_uia::uia_set_text))
+        .route("/v1/uia/select", post(handlers_uia::uia_select))
+        .route("/v1/uia/press", post(handlers_uia::uia_press));
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive()) // LAN-only, tablet is the only client
         .with_state(state)

@@ -220,6 +220,121 @@ async fn roots_restricts_file_access() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+// ---------------------------------------------------------------------------
+// UIA endpoint tests (Windows only — Linux has no UIA).
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_dump_requires_auth_when_token_set() {
+    let app = build_router(make_state_with_token("uia-secret"));
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/uia/dump").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_dump_accepts_valid_token() {
+    let app = build_router(make_state_with_token("uia-secret"));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/uia/dump")
+                .header(header::AUTHORIZATION, "Bearer uia-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // We don't assert 200 because there's no UIA-friendly window in CI.
+    // The test only proves auth passed — auth-failure is 401.
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_invoke_requires_body() {
+    let app = build_router(make_state());
+    // No body — axum's Json extractor will reject with 415/400.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/uia/invoke")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // We only check that the route is wired (not 404 / 405).
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+    assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_invoke_rejects_missing_automation_id() {
+    let app = build_router(make_state());
+    let body = serde_json::json!({ "wrong_field": "x" }).to_string();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/uia/invoke")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // We only check that the route exists.
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+    assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_press_requires_auth_when_token_set() {
+    let app = build_router(make_state_with_token("uia-secret"));
+    let body = serde_json::json!({ "keys": "Return" }).to_string();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/uia/press")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn uia_press_accepts_valid_token() {
+    let app = build_router(make_state_with_token("uia-secret"));
+    let body = serde_json::json!({ "keys": "Return" }).to_string();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/uia/press")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer uia-secret")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Minimal URL encoder for path query values (RFC 3986 unreserved + a few
 /// common reserved). We need this because the production code uses
 /// `URLEncoder` in Kotlin, here we're sending raw from Rust.

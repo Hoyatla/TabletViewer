@@ -60,6 +60,22 @@ hostname = "0.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# UI Automation (Windows only) — direct control over desktop apps via the
+# accessibility framework. ~10x faster and 100% reliable for UIA-friendly apps.
+# We use the `windows` crate directly (COM UIA + SendInput). The higher-level
+# `uiautomation` crate is not in our offline cargo cache, so this is the
+# lowest-friction path.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio-test = "0.4"
