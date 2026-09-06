@@ -76,7 +76,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/uia/invoke", post(handlers_uia::uia_invoke))
         .route("/v1/uia/set_text", post(handlers_uia::uia_set_text))
         .route("/v1/uia/select", post(handlers_uia::uia_select))
-        .route("/v1/uia/press", post(handlers_uia::uia_press));
+        .route("/v1/uia/press", post(handlers_uia::uia_press))
+        .route("/v1/uia/screenshot-window", post(handlers_uia::uia_screenshot_window));
 
     router
         .layer(TraceLayer::new_for_http())

@@ -12,8 +12,10 @@
 
 #![cfg(windows)]
 
+use image::{ImageBuffer, Rgba};
 use serde_json::{json, Value};
 use windows::core::{Interface, BSTR};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
@@ -26,7 +28,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId,
+    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, PW_RENDERFULLCONTENT,
 };
 
 // Bounded walk to keep dumps reasonable on apps like Visual Studio.
@@ -353,6 +356,196 @@ pub fn select_by_id(automation_id: &str, value: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// screenshot_window_by_title
+// ---------------------------------------------------------------------------
+
+/// Find a top-level window by exact title via FindWindowW, or by substring
+/// match via EnumWindows if the exact lookup fails. Hidden / minimized
+/// windows are included — the caller can check IsWindowVisible if they care.
+fn find_hwnd_by_title(title: &str) -> Result<HWND, String> {
+    // 1. Try exact match first.
+    let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let exact = unsafe {
+        FindWindowW(windows::core::PCWSTR::null(), windows::core::PCWSTR(title_w.as_ptr())).ok()
+    };
+    if let Some(h) = exact {
+        return Ok(h);
+    }
+
+    // 2. Substring match: walk all top-level windows. We use a thread-local
+    //    pair (term, found) because the EnumWindows callback is `extern
+    //    "system"` and cannot capture Rust state directly. The callback
+    //    runs on the same thread as the call, so the thread-local is
+    //    safe.
+    struct SearchCtx {
+        term_lower: String,
+        found: Option<HWND>,
+    }
+    thread_local! {
+        static SEARCH: std::cell::RefCell<Option<SearchCtx>> = const { std::cell::RefCell::new(None) };
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: isize) -> windows::Win32::Foundation::BOOL {
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        let title = if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        };
+        SEARCH.with(|s| {
+            let mut b = s.borrow_mut();
+            if let Some(ctx) = b.as_mut() {
+                if ctx.found.is_none() && title.to_lowercase().contains(&ctx.term_lower) {
+                    ctx.found = Some(hwnd);
+                }
+            }
+        });
+        if SEARCH.with(|s| s.borrow().as_ref().and_then(|c| c.found).is_some()) {
+            windows::Win32::Foundation::BOOL(0) // stop
+        } else {
+            windows::Win32::Foundation::BOOL(1) // continue
+        }
+    }
+
+    unsafe extern "system" fn enum_proc_trampoline(
+        hwnd: HWND,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::BOOL {
+        enum_proc(hwnd, lparam.0)
+    }
+
+    // Set context, run, read.
+    SEARCH.with(|s| {
+        *s.borrow_mut() = Some(SearchCtx {
+            term_lower: title.to_lowercase(),
+            found: None,
+        });
+    });
+    let result = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::EnumWindows(
+            Some(enum_proc_trampoline),
+            windows::Win32::Foundation::LPARAM(0),
+        )
+    };
+    let found = SEARCH.with(|s| s.borrow_mut().take().and_then(|c| c.found));
+    // Clear the thread-local to avoid leaking between requests on the
+    // same worker thread.
+    SEARCH.with(|s| *s.borrow_mut() = None);
+
+    result.map_err(|e| format!("EnumWindows: {e}"))?;
+    found.ok_or_else(|| format!("no window with title containing '{title}'"))
+}
+
+/// Capture a specific window by its title into a PNG file. The result is a
+/// JSON object with the saved path and the captured dimensions.
+pub fn screenshot_window_by_title(title: &str) -> Result<Value, String> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+
+    let hwnd = find_hwnd_by_title(title)?;
+
+    // Get window rect (screen coordinates).
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?; }
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 || width > 8192 || height > 8192 {
+        return Err(format!(
+            "invalid rect for '{title}': {}x{} (window minimized or off-screen?)",
+            width, height
+        ));
+    }
+
+    let captures_dir = r"C:\Program Files\SenSÉ\Captures";
+    if let Err(e) = std::fs::create_dir_all(captures_dir) {
+        return Err(format!("create_dir({captures_dir}): {e}"));
+    }
+
+    // Device contexts.
+    let hdc_screen = unsafe { GetDC(hwnd) };
+    let hdc_mem = unsafe { CreateCompatibleDC(hdc_screen) };
+    let hbm = unsafe { CreateCompatibleBitmap(hdc_screen, width, height) };
+
+    unsafe {
+        let _ = SelectObject(hdc_mem, hbm);
+        // PW_RENDERFULLCONTENT (0x2) captures the DWM-composed window,
+        // which is what you see on screen (not just the legacy GDI bits).
+        let _ = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
+    }
+
+    // Extract pixels.
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height, // negative = top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0, // BI_RGB
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [Default::default(); 1],
+    };
+
+    let mut buffer: Vec<u8> = vec![0u8; (width as usize) * (height as usize) * 4];
+    let scan_lines = unsafe {
+        GetDIBits(
+            hdc_mem,
+            hbm.clone(),
+            0,
+            height as u32,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        )
+    };
+    if scan_lines == 0 {
+        return Err("GetDIBits returned 0 scanlines".into());
+    }
+
+    // GDI gives us BGRA; the `image` crate wants RGBA. Swap B and R.
+    for chunk in buffer.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+    }
+
+    // Build image + save PNG.
+    let img_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(width as u32, height as u32, buffer)
+            .ok_or_else(|| "ImageBuffer::from_raw returned None".to_string())?;
+    let ts = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+    let path = format!(r"{}\screenshot-{}.png", captures_dir, ts);
+    img_buf.save(&path).map_err(|e| format!("save PNG: {e}"))?;
+
+    // Cleanup GDI handles. `hbm` was moved into `SelectObject` above, but
+    // `SelectObject` returns the *previous* handle — so on most windows
+    // `hbm` is still ours and should be deleted. We do a defensive `is_err`
+    // check via the BOOL return to avoid double-free if the bitmap was
+    // discarded internally.
+    unsafe {
+        let _ = DeleteObject(hbm);
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(hwnd, hdc_screen);
+    }
+
+    Ok(json!({
+        "path": path,
+        "width": width,
+        "height": height,
+        "title": title,
+        "hwnd": hwnd.0 as u64,
+        "visible": unsafe { IsWindowVisible(hwnd).as_bool() },
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard (real — SendInput path)
 // ---------------------------------------------------------------------------
 
@@ -432,8 +625,8 @@ fn parse_key(s: &str) -> Option<VIRTUAL_KEY> {
         "home" | "debut" => 0x24,
         "end" | "fin" => 0x23,
         // Page Up / Page Down
-        "pageup" | "pgup" | "pg prec" | "pguprec" | "page prec" | "pageup" => 0x21,
-        "pagedown" | "pgdn" | "pg suiv" | "pgsuiv" | "page suiv" | "pagedown" => 0x22,
+        "pageup" | "pgup" | "pg prec" | "pguprec" | "page prec" => 0x21,
+        "pagedown" | "pgdn" | "pg suiv" | "pgsuiv" | "page suiv" => 0x22,
         // Arrow keys
         "left" | "gauche" | "fleche gauche" | "flechegauche" => 0x25,
         "up" | "haut" | "fleche haut" | "flechehaut" => 0x26,

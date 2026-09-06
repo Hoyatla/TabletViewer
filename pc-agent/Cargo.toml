@@ -66,8 +66,11 @@ libc = "0.2"
 # `uiautomation` crate is not in our offline cargo cache, so this is the
 # lowest-friction path.
 [target.'cfg(windows)'.dependencies]
+chrono = "0.4"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_UI_Accessibility",

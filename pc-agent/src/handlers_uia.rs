@@ -119,6 +119,33 @@ pub async fn uia_select(
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/uia/screenshot-window
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ScreenshotWindowBody {
+    pub title: String,
+}
+
+pub async fn uia_screenshot_window(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ScreenshotWindowBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    match uia::screenshot_window_by_title(&body.title) {
+        Ok(v) => (StatusCode::OK, Json(json!({ "ok": true, "data": v }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/uia/press
 // ---------------------------------------------------------------------------
 
@@ -153,6 +180,7 @@ const _: fn() = || {
     assert_json::<SetTextBody>();
     assert_json::<SelectBody>();
     assert_json::<PressBody>();
+    assert_json::<ScreenshotWindowBody>();
     // Touch the import so the compiler doesn't drop it if all callers
     // change their patterns.
     let _: Option<Json<Value>> = None;
