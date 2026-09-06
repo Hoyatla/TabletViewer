@@ -211,6 +211,137 @@ pub async fn uia_dump_window(
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/uia/focus-window
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FocusWindowBody {
+    /// HWND as decimal or hex (`"0xABCD"`). We accept both for ergonomic
+    /// reasons — callers usually copy hex from dump, the assistant often
+    /// copies the decimal from the JSON output.
+    pub hwnd: String,
+}
+
+fn parse_hwnd(s: &str) -> Result<windows::Win32::Foundation::HWND, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| format!("bad hex hwnd: {e}"))
+    } else {
+        s.parse::<u64>().map_err(|e| format!("bad decimal hwnd: {e}"))
+    }?;
+    Ok(windows::Win32::Foundation::HWND(parsed as *mut _))
+}
+
+pub async fn uia_focus_window(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FocusWindowBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    let hwnd = match parse_hwnd(&body.hwnd) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response()
+        }
+    };
+    match uia::focus_window(hwnd) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/uia/find-main-edit
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FindMainEditBody {
+    /// Optional. If present, dump the named window and pick the best
+    /// candidate. If absent, dump the foreground window.
+    pub title: Option<String>,
+}
+
+pub async fn uia_find_main_edit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FindMainEditBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    let automation = match uia::get_automation() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response()
+        }
+    };
+    // Resolve the root element: from title if given, else foreground/root.
+    let root: windows::Win32::UI::Accessibility::IUIAutomationElement = if let Some(title) = body.title.as_deref() {
+        let hwnd_res = uia::find_hwnd_by_title(title);
+        let hwnd = match hwnd_res {
+            Ok(h) => h,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": e })),
+                )
+                    .into_response();
+            }
+        };
+        match unsafe { automation.ElementFromHandle(hwnd) } {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": format!("ElementFromHandle({title}): {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        match unsafe { automation.GetFocusedElement() }
+            .or_else(|_| unsafe { automation.GetRootElement() })
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": format!("GetFocused/Root: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    match uia::find_main_edit(&automation, &root) {
+        Ok(Some(v)) => (StatusCode::OK, Json(json!({ "ok": true, "data": v }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "no Document/Pane/Edit candidate found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/uia/press
 // ---------------------------------------------------------------------------
 

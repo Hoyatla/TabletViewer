@@ -505,3 +505,30 @@ fn uia_dump_window_by_unknown_title_errors() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn uia_focus_window_rejects_invalid_hwnd() {
+    // HWND 0 is invalid; the function should return an error, not crash.
+    let result = pc_agent::uia::focus_window(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+    assert!(result.is_err(), "focus_window(0) should return Err");
+    assert_eq!(result.unwrap_err(), "invalid HWND");
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_find_main_edit_does_not_panic_on_foreground() {
+    // Smoke test: calling find_main_edit on the current foreground
+    // (whatever it is) must return Ok, even if no Edit candidate is found.
+    // It returns Ok(None) when nothing matches, Ok(Some(...)) when it does.
+    let automation = pc_agent::uia::get_automation()
+        .expect("get_automation should not fail on Windows");
+    let root_res = unsafe { automation.GetFocusedElement() }
+        .or_else(|_| unsafe { automation.GetRootElement() });
+    let Ok(root) = root_res else {
+        // No focused element (e.g. UAC dialog) — skip the test gracefully.
+        return;
+    };
+    let result = pc_agent::uia::find_main_edit(&automation, &root);
+    assert!(result.is_ok(), "find_main_edit should never return Err on a real window: {:?}", result.err());
+}
+

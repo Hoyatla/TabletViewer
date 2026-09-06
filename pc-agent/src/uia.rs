@@ -25,16 +25,17 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationSelectionItemPattern, IUIAutomationValuePattern, ExpandCollapseState_Collapsed,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SetFocus, VIRTUAL_KEY,
 };
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, PW_RENDERFULLCONTENT,
+    IsWindowVisible, PW_RENDERFULLCONTENT, SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 
 // Bounded walk to keep dumps reasonable on apps like Visual Studio.
 const MAX_DEPTH: usize = 5;
-const MAX_ELEMENTS: usize = 100;
+const MAX_ELEMENTS: usize = 200;
 
 // ---------------------------------------------------------------------------
 // COM init
@@ -47,7 +48,7 @@ fn init_com() {
     }
 }
 
-fn get_automation() -> Result<IUIAutomation, String> {
+pub fn get_automation() -> Result<IUIAutomation, String> {
     init_com();
     // CLSID_CUIAutomation = {ff48dba4-60ef-4201-aa87-54103eef594e}
     let clsid = windows::core::GUID::from_u128(0xff48dba4_60ef_4201_aa87_54103eef594e);
@@ -69,19 +70,56 @@ fn proc_name_for_pid(pid: u32) -> String {
 // dump_active_window
 // ---------------------------------------------------------------------------
 
-/// Walk the UIA subtree of `root_element` and append each visible control
-/// to `out`. Bounded by MAX_DEPTH and MAX_ELEMENTS. Returns the count.
-fn collect_subtree(
+/// Walk the UIA subtree of `root_element` and build a tree. Bounded by
+/// `MAX_DEPTH` (per branch) and `MAX_ELEMENTS` (total across the whole
+/// tree). The counter is shared so a wide tree gets trimmed uniformly
+/// rather than producing, say, 200 nodes in the leftmost branch and
+/// nothing on the right.
+fn build_subtree(
     walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    root_element: &IUIAutomationElement,
-    out: &mut Vec<Value>,
-) {
-    walk(walker, root_element, 0, out);
+    element: &IUIAutomationElement,
+    depth: usize,
+    counter: &mut usize,
+) -> Value {
+    if *counter >= MAX_ELEMENTS || depth > MAX_DEPTH {
+        return Value::Null;
+    }
+    let Some(desc) = describe_node(element) else {
+        return Value::Null;
+    };
+    *counter += 1;
+
+    // Recurse into children + siblings of `element`.
+    let mut children: Vec<Value> = Vec::new();
+    if depth < MAX_DEPTH && *counter < MAX_ELEMENTS {
+        if let Ok(first_child) = unsafe { walker.GetFirstChildElement(element) } {
+            let mut current: Option<IUIAutomationElement> = Some(first_child);
+            while let Some(el) = current.take() {
+                if *counter >= MAX_ELEMENTS {
+                    break;
+                }
+                let sub = build_subtree(walker, &el, depth + 1, counter);
+                if !sub.is_null() {
+                    children.push(sub);
+                }
+                current = unsafe { walker.GetNextSiblingElement(&el) }.ok();
+            }
+        }
+    }
+
+    json!({
+        "name": desc.name,
+        "type": desc.type_name,
+        "automationId": desc.automation_id,
+        "enabled": desc.enabled,
+        "rect": desc.rect,
+        "children": children,
+    })
 }
 
 /// Build a JSON dump for a given IUIAutomationElement (and its source HWND
 /// for window-name + process). Used by `dump_active_window` and
-/// `dump_window_by_title`.
+/// `dump_window_by_title`. Returns a tree, not a flat list.
 fn build_dump(automation: &IUIAutomation, hwnd: HWND, root: &IUIAutomationElement) -> Result<Value, String> {
     let window_name = unsafe { root.CurrentName() }
         .map(|b| b.to_string())
@@ -96,18 +134,16 @@ fn build_dump(automation: &IUIAutomation, hwnd: HWND, root: &IUIAutomationElemen
 
     let walker = unsafe { automation.RawViewWalker() }
         .map_err(|e| format!("RawViewWalker: {e}"))?;
-    let _condition = unsafe { automation.CreateTrueCondition() }
-        .map_err(|e| format!("CreateTrueCondition: {e}"))?;
 
-    let mut controls: Vec<Value> = Vec::new();
-    collect_subtree(&walker, root, &mut controls);
-    let control_count = controls.len();
+    let mut counter: usize = 0;
+    let tree = build_subtree(&walker, root, 0, &mut counter);
+    let node_count = counter;
 
     Ok(json!({
         "window": window_name,
         "process": process,
-        "control_count": control_count,
-        "controls": controls,
+        "node_count": node_count,
+        "tree": tree,
     }))
 }
 
@@ -175,76 +211,42 @@ pub fn list_visible_windows() -> Result<Vec<(HWND, String)>, String> {
     Ok(collected)
 }
 
-fn walk(
-    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    parent: &IUIAutomationElement,
-    depth: usize,
-    out: &mut Vec<Value>,
-) -> Result<(), String> {
-    if depth > MAX_DEPTH || out.len() >= MAX_ELEMENTS {
-        return Ok(());
-    }
-    // First child of `parent`.
-    let child_res = unsafe { walker.GetFirstChildElement(parent) };
-    match child_res {
-        Ok(child) => Ok(walk_sibling_chain(walker, &child, depth, out)),
-        Err(_) => Ok(()),
-    }
+/// Description extracted from an IUIAutomationElement. Used by
+/// `build_subtree` to attach metadata to every tree node, and by
+/// `find_main_edit` to score candidates.
+struct NodeDesc {
+    name: String,
+    type_name: &'static str,
+    automation_id: String,
+    enabled: bool,
+    rect: Option<(i32, i32, i32, i32)>, // (x, y, w, h)
 }
 
-fn walk_sibling_chain(
-    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    first: &IUIAutomationElement,
-    depth: usize,
-    out: &mut Vec<Value>,
-) {
-    let mut current: Option<IUIAutomationElement> = Some(first.clone());
-    while let Some(el) = current.take() {
-        if out.len() >= MAX_ELEMENTS {
-            break;
-        }
-        if let Some(v) = describe(&el) {
-            out.push(v);
-        }
-        // Recurse into children.
-        if depth + 1 <= MAX_DEPTH {
-            if let Ok(child) = unsafe { walker.GetFirstChildElement(&el) } {
-                walk_sibling_chain(walker, &child, depth + 1, out);
-            }
-        }
-        // Next sibling.
-        match unsafe { walker.GetNextSiblingElement(&el) } {
-            Ok(next) => current = Some(next),
-            Err(_) => break,
-        }
+fn rect_tuple(el: &IUIAutomationElement) -> Option<(i32, i32, i32, i32)> {
+    let r = unsafe { el.CurrentBoundingRectangle() }.ok()?;
+    if r.right <= r.left || r.bottom <= r.top {
+        return None;
     }
+    Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
 }
 
-fn describe(el: &IUIAutomationElement) -> Option<Value> {
+fn describe_node(el: &IUIAutomationElement) -> Option<NodeDesc> {
     let name = unsafe { el.CurrentName() }.ok().map(|b| b.to_string()).unwrap_or_default();
     let automation_id = unsafe { el.CurrentAutomationId() }.ok().map(|b| b.to_string()).unwrap_or_default();
     let control_type_id = unsafe { el.CurrentControlType() }.ok().map(|c| c.0).unwrap_or(0);
     let enabled = unsafe { el.CurrentIsEnabled() }.ok().map(|b| b.as_bool()).unwrap_or(false);
-    let rect = unsafe { el.CurrentBoundingRectangle() }.ok();
+    let rect = rect_tuple(el);
 
     if name.is_empty() && automation_id.is_empty() {
         return None;
     }
-    let rect_arr = rect.map(|r| {
-        if r.right > r.left && r.bottom > r.top {
-            Some(json!([r.left, r.top, r.right - r.left, r.bottom - r.top]))
-        } else {
-            None
-        }
-    }).flatten();
-
-    Some(json!({
-        "name": name,
-        "type": control_type_name(control_type_id),
-        "automationId": automation_id,
-        "enabled": enabled,
-        "rect": rect_arr,
-    }))
+    Some(NodeDesc {
+        name,
+        type_name: control_type_name(control_type_id),
+        automation_id,
+        enabled,
+        rect,
+    })
 }
 
 fn control_type_name(id: i32) -> &'static str {
@@ -291,6 +293,122 @@ fn control_type_name(id: i32) -> &'static str {
         50038 => "Separator",
         _ => "Unknown",
     }
+}
+
+// ---------------------------------------------------------------------------
+// focus_window
+// ---------------------------------------------------------------------------
+
+/// Best-effort `SetForegroundWindow`. Windows normally refuses to let a
+/// background process steal focus; the canonical workaround is to attach
+/// the calling thread's input state to the foreground thread's, then
+/// `SetForegroundWindow`, then detach. We also `SetFocus` on the HWND for
+/// keyboard input and a 200 ms sleep to let the WM_SETFOCUS settle.
+pub fn focus_window(hwnd: HWND) -> Result<(), String> {
+    if hwnd.is_invalid() {
+        return Err("invalid HWND".into());
+    }
+    unsafe {
+        // Restore if minimized.
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+
+        let foreground_hwnd = GetForegroundWindow();
+        let foreground_thread = if foreground_hwnd.is_invalid() {
+            GetCurrentThreadId()
+        } else {
+            GetWindowThreadProcessId(foreground_hwnd, None)
+        };
+        let current_thread = GetCurrentThreadId();
+
+        let attached = if foreground_thread != current_thread {
+            let ok = AttachThreadInput(foreground_thread, current_thread, true).as_bool();
+            let _ = SetForegroundWindow(hwnd);
+            if ok {
+                let _ = AttachThreadInput(foreground_thread, current_thread, false);
+            }
+            true
+        } else {
+            let _ = SetForegroundWindow(hwnd);
+            false
+        };
+
+        let _ = SetFocus(hwnd);
+
+        // Give the WM_SETFOCUS a chance to land.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = attached;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// find_main_edit
+// ---------------------------------------------------------------------------
+
+/// Walk the descendants of `root` and pick the best Edit/Pane/Document to
+/// type text into. Heuristic:
+///   1. any `Document` (always wins — it's the main canvas in modern apps)
+///   2. otherwise the largest `Pane` (likely a content area)
+///   3. otherwise the largest `Edit` (a literal text box)
+/// Returns `Ok(Some(json))` with `{automationId, name, type, rect}` or
+/// `Ok(None)` if no candidate matches.
+pub fn find_main_edit(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Result<Option<Value>, String> {
+    let cond = unsafe { automation.CreateTrueCondition() }
+        .map_err(|e| format!("CreateTrueCondition: {e}"))?;
+    let arr: IUIAutomationElementArray = unsafe {
+        root.FindAll(
+            windows::Win32::UI::Accessibility::TreeScope_Descendants,
+            &cond,
+        )
+    }
+    .map_err(|e| format!("FindAll: {e}"))?;
+    let len_res = unsafe { arr.Length() };
+    let len = match len_res {
+        Ok(n) => n as usize,
+        Err(_) => return Ok(None), // can't determine length → no candidates
+    };
+
+    // (score, NodeDesc). We don't keep the IUIAutomationElement since the
+    // caller only needs the metadata (automationId, name, type, rect).
+    let mut best: Option<(i64, NodeDesc)> = None;
+    for i in 0..len.min(MAX_ELEMENTS) {
+        let Ok(el) = (unsafe { arr.GetElement(i as i32) }) else { continue };
+        let Some(desc) = describe_node(&el) else { continue };
+        if !desc.enabled {
+            continue;
+        }
+        let area: i64 = desc
+            .rect
+            .map(|(_, _, w, h)| (w as i64) * (h as i64))
+            .unwrap_or(0);
+        if area == 0 {
+            continue;
+        }
+        let score: i64 = match desc.type_name {
+            // Document always wins, then Pane, then Edit. Area is a
+            // tie-breaker within the same type.
+            "Document" => 1_000_000_000 + area,
+            "Pane" => 1_000_000 + area,
+            "Edit" => 1_000 + area,
+            _ => continue,
+        };
+        if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+            best = Some((score, desc));
+        }
+    }
+
+    Ok(best.map(|(_, d)| {
+        let rect_arr = d.rect.map(|(x, y, w, h)| json!([x, y, w, h]));
+        json!({
+            "automationId": d.automation_id,
+            "name": d.name,
+            "type": d.type_name,
+            "rect": rect_arr,
+        })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +543,7 @@ pub fn select_by_id(automation_id: &str, value: &str) -> Result<(), String> {
 /// Find a top-level window by exact title via FindWindowW, or by substring
 /// match via EnumWindows if the exact lookup fails. Hidden / minimized
 /// windows are included — the caller can check IsWindowVisible if they care.
-fn find_hwnd_by_title(title: &str) -> Result<HWND, String> {
+pub fn find_hwnd_by_title(title: &str) -> Result<HWND, String> {
     // 1. Try exact match first.
     let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let exact = unsafe {
