@@ -429,3 +429,48 @@ fn uia_press_keys_rejects_unknown_keys() {
     assert!(pc_agent::uia::press_keys("Ctrl+NoSuchKey").is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn uia_press_keys_accepts_french_aliases() {
+    // Each of these used to fail with "unknown key"; they must now parse OK
+    // (and SendInput is a no-op on a headless test host, but it must not error).
+    for keys in [
+        // Print Screen / Impr ecran — the headline bug
+        "Impr",
+        "printscreen",
+        "PrtSc",
+        "snapshot",
+        "impr ecran",
+        "Ctrl+Impr",
+        "Ctrl+Alt+Impr",
+        // French arrow / nav
+        "Gauche", "Droite", "Haut", "Bas",
+        "fleche haut", "fleche bas", "fleche gauche", "fleche droite",
+        "Debut", "Fin", "Pg prec", "Pg suiv",
+        // Other French common names
+        "Echap", "Retour", "Supprimer", "Suppr",
+        "Tabulation", "Espace",
+        // Existing English aliases must still work
+        "Return", "Escape", "Esc", "Tab", "Space", "Delete", "Del",
+        "Home", "End", "PageUp", "PgUp", "PageDown", "PgDn",
+        "Left", "Up", "Right", "Down",
+        "F5", "F12",
+        "Ctrl+S", "Alt+F4", "Ctrl+Alt+Impr", "Win+Shift+S", "Win+R",
+        // Insert and lock keys (new)
+        "Insert", "Ins", "CapsLock", "NumLock", "ScrollLock",
+    ] {
+        let result = pc_agent::uia::press_keys(keys);
+        assert!(result.is_ok(), "press_keys({keys}) failed: {:?}", result);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_press_keys_rejects_real_unknown_keys() {
+    // Regression: a typo / truly invalid name should still error.
+    for keys in ["Win+Rn", "Imprr", "FooBar", "Ctrl+Imprr", "NotAKey+More"] {
+        let result = pc_agent::uia::press_keys(keys);
+        assert!(result.is_err(), "press_keys({keys}) should have failed but succeeded");
+    }
+}
+

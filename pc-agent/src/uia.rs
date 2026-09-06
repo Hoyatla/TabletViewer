@@ -363,7 +363,7 @@ pub fn press_keys(keys: &str) -> Result<(), String> {
     }
 
     let main_vk = parse_key(parts[parts.len() - 1])
-        .ok_or_else(|| format!("unknown key: '{}'", parts[parts.len() - 1]))?;
+        .ok_or_else(|| format!("unknown key: '{}'. {}", parts[parts.len() - 1], known_key_hints()))?;
     let modifiers: Vec<VIRTUAL_KEY> = parts[..parts.len() - 1]
         .iter()
         .map(|m| parse_modifier(m))
@@ -411,23 +411,43 @@ fn parse_modifier(s: &str) -> Result<VIRTUAL_KEY, String> {
 
 fn parse_key(s: &str) -> Option<VIRTUAL_KEY> {
     let k = match s.to_ascii_lowercase().as_str() {
-        "return" | "enter" | "cr" => 0x0D,
-        "escape" | "esc" => 0x1B,
-        "tab" => 0x09,
-        "space" | "spc" => 0x20,
-        "backspace" | "bs" => 0x08,
-        "delete" | "del" => 0x2E,
-        "home" => 0x24,
-        "end" => 0x23,
-        "pageup" | "pgup" => 0x21,
-        "pagedown" | "pgdn" => 0x22,
-        "left" => 0x25,
-        "up" => 0x26,
-        "right" => 0x27,
-        "down" => 0x28,
+        // Return / Enter
+        "return" | "enter" | "cr" | "retour" => 0x0D,
+        // Escape
+        "escape" | "esc" | "echap" => 0x1B,
+        // Tab
+        "tab" | "tabulation" => 0x09,
+        // Space
+        "space" | "spc" | "espace" => 0x20,
+        // Backspace
+        "backspace" | "bs" | "retour arriere" | "retourchariot" => 0x08,
+        // Delete
+        "delete" | "del" | "supprimer" | "suppr" => 0x2E,
+        // Insert
+        "insert" | "ins" | "inserer" => 0x2D,
+        // Print Screen / Impr ecran
+        "print" | "printscreen" | "print screen" | "prtsc" | "prtscr"
+            | "snapshot" | "impr" | "impr ecran" | "imprecran" => 0x2C,
+        // Home / End
+        "home" | "debut" => 0x24,
+        "end" | "fin" => 0x23,
+        // Page Up / Page Down
+        "pageup" | "pgup" | "pg prec" | "pguprec" | "page prec" | "pageup" => 0x21,
+        "pagedown" | "pgdn" | "pg suiv" | "pgsuiv" | "page suiv" | "pagedown" => 0x22,
+        // Arrow keys
+        "left" | "gauche" | "fleche gauche" | "flechegauche" => 0x25,
+        "up" | "haut" | "fleche haut" | "flechehaut" => 0x26,
+        "right" | "droite" | "fleche droite" | "flechedroite" => 0x27,
+        "down" | "bas" | "fleche bas" | "flechebas" => 0x28,
+        // Function keys
         "f1" => 0x70, "f2" => 0x71, "f3" => 0x72, "f4" => 0x73,
         "f5" => 0x74, "f6" => 0x75, "f7" => 0x76, "f8" => 0x77,
         "f9" => 0x78, "f10" => 0x79, "f11" => 0x7A, "f12" => 0x7B,
+        // Lock keys
+        "capslock" | "caps lock" | "verrouillage maj" => 0x14,
+        "numlock" | "num lock" | "verrouillage num" => 0x90,
+        "scrolllock" | "scroll lock" | "verrouillage defil" => 0x91,
+        // Single alphanumeric: A=0x41, 0=0x30
         other if other.len() == 1 => {
             let c = other.chars().next().unwrap();
             let upper = c.to_ascii_uppercase() as u16;
@@ -440,6 +460,17 @@ fn parse_key(s: &str) -> Option<VIRTUAL_KEY> {
         _ => return None,
     };
     Some(VIRTUAL_KEY(k))
+}
+
+/// Hint returned when a key name doesn't match. Lists a sample of the
+/// most common English + French aliases so the caller has a fighting chance
+/// of guessing the right name without reading the source.
+fn known_key_hints() -> &'static str {
+    "known keys: a-z, 0-9, F1-F12, Return/Enter/Retour, Escape/Echap/Esc, \
+     Tab/Tabulation, Space/Espace, Backspace/Retour, Delete/Supprimer/Suppr, \
+     Insert/Ins, PrintScreen/Impr/PrtSc/Snapshot, Home/Debut, End/Fin, \
+     PageUp/PageDown/PgUp/PgDn, Left/Right/Up/Down/Gauche/Droite/Haut/Bas; \
+     modifiers: Ctrl/Control, Shift, Alt/Menu, Win/Super/Meta"
 }
 
 // Touch unused imports / types so the compiler keeps them available if a
