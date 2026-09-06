@@ -73,6 +73,8 @@ pub fn build_router(state: AppState) -> Router {
     #[cfg(windows)]
     let router = router
         .route("/v1/uia/dump", get(handlers_uia::uia_dump))
+        .route("/v1/uia/list-windows", get(handlers_uia::uia_list_windows))
+        .route("/v1/uia/dump-window", post(handlers_uia::uia_dump_window))
         .route("/v1/uia/invoke", post(handlers_uia::uia_invoke))
         .route("/v1/uia/set_text", post(handlers_uia::uia_set_text))
         .route("/v1/uia/select", post(handlers_uia::uia_select))

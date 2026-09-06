@@ -69,38 +69,38 @@ fn proc_name_for_pid(pid: u32) -> String {
 // dump_active_window
 // ---------------------------------------------------------------------------
 
-pub fn dump_active_window() -> Result<Value, String> {
-    let automation = get_automation()?;
-    let root = unsafe { automation.GetFocusedElement() }
-        .or_else(|_| unsafe { automation.GetRootElement() })
-        .map_err(|e| format!("GetFocused/Root: {e}"))?;
+/// Walk the UIA subtree of `root_element` and append each visible control
+/// to `out`. Bounded by MAX_DEPTH and MAX_ELEMENTS. Returns the count.
+fn collect_subtree(
+    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+    root_element: &IUIAutomationElement,
+    out: &mut Vec<Value>,
+) {
+    walk(walker, root_element, 0, out);
+}
 
-    // Window name via direct property. Process id: try to get from the
-    // element's CurrentProcessId (we don't have a direct getter for that on
-    // IUIAutomationElement in 0.58, so fall back to the foreground HWND).
+/// Build a JSON dump for a given IUIAutomationElement (and its source HWND
+/// for window-name + process). Used by `dump_active_window` and
+/// `dump_window_by_title`.
+fn build_dump(automation: &IUIAutomation, hwnd: HWND, root: &IUIAutomationElement) -> Result<Value, String> {
     let window_name = unsafe { root.CurrentName() }
         .map(|b| b.to_string())
         .unwrap_or_default();
-
-    let process = unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            String::new()
-        } else {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            proc_name_for_pid(pid)
-        }
+    let process = if hwnd.is_invalid() {
+        String::new()
+    } else {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        proc_name_for_pid(pid)
     };
 
-    // Bounded walk using a raw TreeWalker.
     let walker = unsafe { automation.RawViewWalker() }
         .map_err(|e| format!("RawViewWalker: {e}"))?;
-    let condition = unsafe { automation.CreateTrueCondition() }
+    let _condition = unsafe { automation.CreateTrueCondition() }
         .map_err(|e| format!("CreateTrueCondition: {e}"))?;
 
     let mut controls: Vec<Value> = Vec::new();
-    let _ = walk(&walker, &root, &condition, 0, &mut controls);
+    collect_subtree(&walker, root, &mut controls);
     let control_count = controls.len();
 
     Ok(json!({
@@ -111,10 +111,73 @@ pub fn dump_active_window() -> Result<Value, String> {
     }))
 }
 
+pub fn dump_active_window() -> Result<Value, String> {
+    let automation = get_automation()?;
+    let root = unsafe { automation.GetFocusedElement() }
+        .or_else(|_| unsafe { automation.GetRootElement() })
+        .map_err(|e| format!("GetFocused/Root: {e}"))?;
+    let hwnd = unsafe { GetForegroundWindow() };
+    build_dump(&automation, hwnd, &root)
+}
+
+/// Dump the UIA subtree of a specific window identified by its title. The
+/// title is matched as a case-insensitive substring against the visible
+/// top-level windows — same logic as `screenshot_window_by_title`.
+pub fn dump_window_by_title(title: &str) -> Result<Value, String> {
+    let hwnd = find_hwnd_by_title(title)?;
+    let automation = get_automation()?;
+    // ElementFromHandle gives us the root UI element for that HWND.
+    let root = unsafe { automation.ElementFromHandle(hwnd) }
+        .map_err(|e| format!("ElementFromHandle({title}): {e}"))?;
+    build_dump(&automation, hwnd, &root)
+}
+
+/// List all visible top-level windows with their HWND and title. Hidden /
+/// minimized windows are skipped. Returns Vec<(HWND, title)>.
+pub fn list_visible_windows() -> Result<Vec<(HWND, String)>, String> {
+    // Thread-local accumulator: the EnumWindows callback is `extern
+    // "system"` and cannot capture Rust state directly.
+    thread_local! {
+        static FOUND: std::cell::RefCell<Vec<(HWND, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    unsafe extern "system" fn collect_proc(hwnd: HWND, _lparam: isize) -> windows::Win32::Foundation::BOOL {
+        // Skip invisible / minimized windows.
+        if !IsWindowVisible(hwnd).as_bool() {
+            return windows::Win32::Foundation::BOOL(1);
+        }
+        let mut text = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut text);
+        if len > 0 {
+            let title = String::from_utf16_lossy(&text[..len as usize]);
+            if !title.is_empty() {
+                FOUND.with(|v| v.borrow_mut().push((hwnd, title)));
+            }
+        }
+        windows::Win32::Foundation::BOOL(1) // continue
+    }
+    unsafe extern "system" fn collect_proc_trampoline(
+        hwnd: HWND,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::BOOL {
+        collect_proc(hwnd, lparam.0)
+    }
+
+    FOUND.with(|v| v.borrow_mut().clear());
+    let result = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::EnumWindows(
+            Some(collect_proc_trampoline),
+            windows::Win32::Foundation::LPARAM(0),
+        )
+    };
+    let collected = FOUND.with(|v| v.borrow_mut().drain(..).collect::<Vec<_>>());
+    result.map_err(|e| format!("EnumWindows: {e}"))?;
+    Ok(collected)
+}
+
 fn walk(
     walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
     parent: &IUIAutomationElement,
-    _condition: &windows::Win32::UI::Accessibility::IUIAutomationCondition,
     depth: usize,
     out: &mut Vec<Value>,
 ) -> Result<(), String> {

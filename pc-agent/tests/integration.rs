@@ -474,3 +474,34 @@ fn uia_press_keys_rejects_real_unknown_keys() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn uia_list_windows_returns_at_least_one_window() {
+    // On any real Windows host there is at least the desktop / Program
+    // Manager. We don't assert the exact name because it's locale-dependent
+    // (e.g. "Program Manager" in EN, "Gestionnaire des tâches" in FR), but
+    // we do assert that the list is non-empty and each entry has a non-empty
+    // title.
+    let result = pc_agent::uia::list_visible_windows();
+    let windows_list = result.expect("list_visible_windows should not error");
+    assert!(!windows_list.is_empty(), "list_visible_windows returned an empty list");
+    for (hwnd, title) in &windows_list {
+        assert!(!title.is_empty(), "window has empty title: hwnd={hwnd:?}");
+        assert!(!hwnd.is_invalid(), "window has invalid HWND: {title}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn uia_dump_window_by_unknown_title_errors() {
+    // Regression: a title that doesn't exist must return an Err, not Ok with
+    // empty data.
+    let result = pc_agent::uia::dump_window_by_title("definitely-not-a-real-window-title-xyz-12345");
+    assert!(result.is_err(), "expected error for unknown window title");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("no window with title") || err.contains("fenetre non trouvee"),
+        "unexpected error: {err}"
+    );
+}
+
