@@ -76,11 +76,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/uia/list-windows", get(handlers_uia::uia_list_windows))
         .route("/v1/uia/dump-window", post(handlers_uia::uia_dump_window))
         .route("/v1/uia/invoke", post(handlers_uia::uia_invoke))
+        .route("/v1/uia/invoke-by-name", post(handlers_uia::uia_invoke_by_name))
         .route("/v1/uia/set_text", post(handlers_uia::uia_set_text))
         .route("/v1/uia/select", post(handlers_uia::uia_select))
         .route("/v1/uia/press", post(handlers_uia::uia_press))
         .route("/v1/uia/screenshot-window", post(handlers_uia::uia_screenshot_window))
         .route("/v1/uia/focus-window", post(handlers_uia::uia_focus_window))
+        .route("/v1/uia/focus-and-type", post(handlers_uia::uia_focus_and_type))
         .route("/v1/uia/find-main-edit", post(handlers_uia::uia_find_main_edit));
 
     router

@@ -261,6 +261,85 @@ pub async fn uia_focus_window(
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/uia/invoke-by-name
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct InvokeByNameBody {
+    /// The label shown on the control, as it appears in a dump's `name` field.
+    pub name: String,
+    /// Optional window to search in. Absent = the foreground window, which is
+    /// what a dialog that just opened will be.
+    pub title: Option<String>,
+}
+
+pub async fn uia_invoke_by_name(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<InvokeByNameBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    match uia::invoke_by_name(&body.name, body.title.as_deref()) {
+        Ok(data) => (StatusCode::OK, Json(json!({ "ok": true, "data": data }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/uia/focus-and-type
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FocusAndTypeBody {
+    /// Target window, decimal or 0x-prefixed. Comes from
+    /// `GET /v1/uia/list-windows`.
+    pub hwnd: String,
+    /// Text to type. Sent as Unicode, so the active keyboard layout does not
+    /// matter.
+    pub text: String,
+}
+
+/// Focus a window and type into it in a single call.
+///
+/// Deliberately synchronous: the focus and the keystrokes must run on the same
+/// thread for `AttachThreadInput` to cover both. Awaiting in between would let
+/// tokio resume the rest on another worker and reintroduce exactly the split
+/// this endpoint exists to close.
+pub async fn uia_focus_and_type(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FocusAndTypeBody>,
+) -> Response {
+    if let Err(r) = check_auth(&state, &headers) {
+        return r;
+    }
+    let hwnd = match parse_hwnd(&body.hwnd) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response()
+        }
+    };
+    match uia::focus_and_type(hwnd, &body.text) {
+        Ok(data) => (StatusCode::OK, Json(json!({ "ok": true, "data": data }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/uia/find-main-edit
 // ---------------------------------------------------------------------------
 

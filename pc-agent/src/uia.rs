@@ -25,7 +25,8 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationSelectionItemPattern, IUIAutomationValuePattern, ExpandCollapseState_Collapsed,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SetFocus, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SetFocus,
+    VIRTUAL_KEY,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -75,46 +76,88 @@ fn proc_name_for_pid(pid: u32) -> String {
 /// tree). The counter is shared so a wide tree gets trimmed uniformly
 /// rather than producing, say, 200 nodes in the leftmost branch and
 /// nothing on the right.
+/// Describe one element and everything under it, returning the nodes to attach
+/// at this level — usually one, none when the branch is empty, several when the
+/// element itself is anonymous and its children are lifted in its place.
+///
+/// **Anonymous containers are traversed, not dropped.** `describe_node` returns
+/// `None` for an element with neither a name nor an automationId, and this
+/// function used to return `Value::Null` on the spot — cutting away the entire
+/// subtree below it. Dialogs are full of such unnamed panels, so the effect was
+/// brutal and silent: LibreOffice's "Enregistrer sous" dumped as three nodes,
+/// two buttons and their parent, while `find_main_edit` — which enumerates with
+/// `FindAll` instead of walking — found a `listview` in that very same dialog a
+/// second later. The file name field and the folder list were there all along,
+/// hidden under a nameless panel. The assistant was not searching badly; it was
+/// being shown an empty room.
+///
+/// An anonymous wrapper carries no information worth a node, so its children are
+/// hoisted to its parent's level. It does not consume a depth step either: it is
+/// invisible in the output, and letting it eat one of the five available levels
+/// would push real content out of reach for no reason.
 fn build_subtree(
     walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
     element: &IUIAutomationElement,
     depth: usize,
     counter: &mut usize,
-) -> Value {
+) -> Vec<Value> {
     if *counter >= MAX_ELEMENTS || depth > MAX_DEPTH {
-        return Value::Null;
+        return Vec::new();
     }
-    let Some(desc) = describe_node(element) else {
-        return Value::Null;
-    };
-    *counter += 1;
 
-    // Recurse into children + siblings of `element`.
+    let desc = describe_node(element);
+    // A described node owns a level; an anonymous one is passed through at the
+    // same depth as its parent.
+    let profondeur_enfants = if desc.is_some() { depth + 1 } else { depth };
+
     let mut children: Vec<Value> = Vec::new();
-    if depth < MAX_DEPTH && *counter < MAX_ELEMENTS {
+    if desc.is_some() {
+        *counter += 1;
+    }
+
+    if profondeur_enfants <= MAX_DEPTH && *counter < MAX_ELEMENTS {
         if let Ok(first_child) = unsafe { walker.GetFirstChildElement(element) } {
             let mut current: Option<IUIAutomationElement> = Some(first_child);
             while let Some(el) = current.take() {
                 if *counter >= MAX_ELEMENTS {
                     break;
                 }
-                let sub = build_subtree(walker, &el, depth + 1, counter);
-                if !sub.is_null() {
-                    children.push(sub);
-                }
+                children.extend(build_subtree(walker, &el, profondeur_enfants, counter));
                 current = unsafe { walker.GetNextSiblingElement(&el) }.ok();
             }
         }
     }
 
-    json!({
-        "name": desc.name,
-        "type": desc.type_name,
-        "automationId": desc.automation_id,
-        "enabled": desc.enabled,
-        "rect": desc.rect,
-        "children": children,
-    })
+    match desc {
+        Some(desc) => {
+            // Only what carries information.
+            //
+            // The dump travels through the assistant's context window, where it competes
+            // with the very conversation it is meant to inform: on 2026-09-06 two dumps
+            // were enough to fill it and drop the thread mid-task. An empty `children`,
+            // an empty `automationId` and `enabled: true` say nothing a reader could not
+            // assume, and together they were about four tenths of the payload. Absence is
+            // the default; only departures from it are written.
+            let mut node = serde_json::Map::new();
+            node.insert("name".into(), json!(desc.name));
+            node.insert("type".into(), json!(desc.type_name));
+            if !desc.automation_id.is_empty() {
+                node.insert("automationId".into(), json!(desc.automation_id));
+            }
+            if !desc.enabled {
+                node.insert("enabled".into(), json!(false));
+            }
+            if let Some(rect) = desc.rect {
+                node.insert("rect".into(), json!(rect));
+            }
+            if !children.is_empty() {
+                node.insert("children".into(), json!(children));
+            }
+            vec![Value::Object(node)]
+        }
+        // Anonymous: hand our children up, and disappear.
+        None => children,
+    }
 }
 
 /// Build a JSON dump for a given IUIAutomationElement (and its source HWND
@@ -136,8 +179,23 @@ fn build_dump(automation: &IUIAutomation, hwnd: HWND, root: &IUIAutomationElemen
         .map_err(|e| format!("RawViewWalker: {e}"))?;
 
     let mut counter: usize = 0;
-    let tree = build_subtree(&walker, root, 0, &mut counter);
+    let noeuds = build_subtree(&walker, root, 0, &mut counter);
     let node_count = counter;
+
+    // La racine elle-meme peut etre anonyme, et rendre alors plusieurs noeuds.
+    // On les regroupe pour que "tree" reste un objet, comme avant.
+    let tree = match noeuds.len() {
+        0 => Value::Null,
+        1 => noeuds.into_iter().next().unwrap_or(Value::Null),
+        _ => json!({
+            "name": window_name,
+            "type": "Group",
+            "automationId": "",
+            "enabled": true,
+            "rect": Value::Null,
+            "children": noeuds,
+        }),
+    };
 
     Ok(json!({
         "window": window_name,
@@ -333,11 +391,54 @@ pub fn focus_window(hwnd: HWND) -> Result<(), String> {
         };
 
         let _ = SetFocus(hwnd);
-
-        // Give the WM_SETFOCUS a chance to land.
-        std::thread::sleep(std::time::Duration::from_millis(200));
         let _ = attached;
-        Ok(())
+
+        // Verify, do not assume.
+        //
+        // Every Win32 call above is best-effort and its result was discarded,
+        // so this function used to return Ok(()) whether or not the focus had
+        // actually moved. Windows refuses SetForegroundWindow from a process
+        // that does not already own the foreground — pc-agent never does — and
+        // the AttachThreadInput workaround only covers the calling thread, so
+        // it is routinely denied. The caller then typed into whatever window
+        // really had focus: on 2026-09-06 the assistant reported "tape 4
+        // caractere(s)" while LibreOffice stayed at "0 mot, 0 caractere",
+        // because the keystrokes had gone somewhere else entirely.
+        //
+        // An honest failure here is worth far more than a cheerful ok: it lets
+        // the caller fall back (click the window first, ask the user to focus
+        // it) instead of typing blind into another application.
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if GetForegroundWindow().0 as u64 == hwnd.0 as u64 {
+                return Ok(());
+            }
+        }
+
+        let actual = GetForegroundWindow();
+        Err(format!(
+            "focus refused by Windows: foreground is still HWND {} ('{}') instead of {}. \
+             A background process cannot steal focus; click the target window, or use a \
+             mouse click on it, before sending keystrokes.",
+            actual.0 as u64,
+            window_title(actual),
+            hwnd.0 as u64
+        ))
+    }
+}
+
+/// Title of a window, or an empty string. Used to name the window that kept
+/// the foreground when a focus attempt is refused.
+fn window_title(hwnd: HWND) -> String {
+    if hwnd.is_invalid() {
+        return String::new();
+    }
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if len > 0 {
+        String::from_utf16_lossy(&buf[..len as usize])
+    } else {
+        String::new()
     }
 }
 
@@ -457,15 +558,171 @@ fn find_by_automation_id(automation_id: &str) -> Result<IUIAutomationElement, St
     unsafe { arr.GetElement(0) }.map_err(|e| format!("GetElement(0): {e}"))
 }
 
+/// Find a control by the name the user sees on it, inside one window.
+///
+/// `automationId` is what `invoke` has always taken, and in many dialogs it is
+/// an opaque ordinal: LibreOffice's "Enregistrer sous" exposes its two buttons
+/// as "1" and "2". Choosing between them by position is a coin flip, and on
+/// 2026-09-06 the assistant lost it — it invoked "2" and cancelled the save it
+/// had been asked to perform. The name is right there in the dump, it is what
+/// the user would read on screen, and it is what the caller should aim at.
+///
+/// The search is scoped to a window rather than the desktop root: a name like
+/// "Enregistrer" or "OK" exists in a dozen places at once, and walking every
+/// descendant of the root element would be both slow and ambiguous. Default is
+/// the foreground window, which is the one a dialog has just taken over.
+///
+/// Matching goes from strict to loose — exact, then case-insensitive, then
+/// substring — and prefers an enabled control at each step, because a greyed
+/// out "Enregistrer" next to an active one is not the target. When nothing
+/// matches, the error lists the names that do exist, so the caller can pick
+/// instead of guessing again.
+fn find_by_name(name: &str, title: Option<&str>) -> Result<IUIAutomationElement, String> {
+    let automation = get_automation()?;
+
+    let hwnd = match title {
+        Some(t) if !t.is_empty() => find_hwnd_by_title(t)?,
+        _ => unsafe { GetForegroundWindow() },
+    };
+    if hwnd.is_invalid() {
+        return Err("no foreground window to search in".into());
+    }
+    let root = unsafe { automation.ElementFromHandle(hwnd) }
+        .map_err(|e| format!("ElementFromHandle: {e}"))?;
+
+    let cond = unsafe { automation.CreateTrueCondition() }
+        .map_err(|e| format!("CreateTrueCondition: {e}"))?;
+    let arr: IUIAutomationElementArray = unsafe {
+        root.FindAll(
+            windows::Win32::UI::Accessibility::TreeScope_Descendants,
+            &cond,
+        )
+    }
+    .map_err(|e| format!("FindAll: {e}"))?;
+    let len = unsafe { arr.Length() }.map_err(|e| format!("Length: {e}"))? as usize;
+
+    let wanted = name.trim();
+    let wanted_lower = wanted.to_lowercase();
+
+    // (element, name, enabled) for every named descendant, capped like the dumps.
+    let mut candidates: Vec<(IUIAutomationElement, String, bool)> = Vec::new();
+    for i in 0..len.min(MAX_ELEMENTS) {
+        let Ok(el) = (unsafe { arr.GetElement(i as i32) }) else {
+            continue;
+        };
+        let el_name = unsafe { el.CurrentName() }
+            .ok()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
+        if el_name.trim().is_empty() {
+            continue;
+        }
+        let enabled = unsafe { el.CurrentIsEnabled() }
+            .ok()
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+        candidates.push((el, el_name, enabled));
+    }
+
+    for pass in 0..3 {
+        // Enabled first within each pass: a disabled twin is never the target.
+        for want_enabled in [true, false] {
+            for (el, el_name, enabled) in &candidates {
+                if *enabled != want_enabled {
+                    continue;
+                }
+                let trimmed = el_name.trim();
+                let hit = match pass {
+                    0 => trimmed == wanted,
+                    1 => trimmed.eq_ignore_ascii_case(wanted),
+                    _ => trimmed.to_lowercase().contains(&wanted_lower),
+                };
+                if hit {
+                    return Ok(el.clone());
+                }
+            }
+        }
+    }
+
+    // List what exists, but capped. In a dialog this is a handful of buttons and
+    // exactly the help the caller needs; in a data-heavy window like the task
+    // manager it would otherwise be two hundred table cells, drowning the answer
+    // it is meant to serve.
+    let mut noms: Vec<&str> = candidates.iter().map(|(_, n, _)| n.trim()).collect();
+    noms.sort_unstable();
+    noms.dedup();
+    const MAX_NOMS: usize = 40;
+    let total = noms.len();
+    let listed = noms.len().min(MAX_NOMS);
+    let suite = if total > listed {
+        format!(" … and {} more", total - listed)
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "no control named '{name}' in this window. {total} named controls present: {}{suite}",
+        noms[..listed].join(" | ")
+    ))
+}
+
+/// Invoke a control by the name shown on it. See [`find_by_name`].
+pub fn invoke_by_name(name: &str, title: Option<&str>) -> Result<Value, String> {
+    let el = find_by_name(name, title)?;
+    let actual = unsafe { el.CurrentName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+
+    let pattern: IUIAutomationInvokePattern =
+        pattern_of(&el, windows::Win32::UI::Accessibility::UIA_InvokePatternId, "Invoke")?
+            .cast()
+            .map_err(|e| format!("cast to IUIAutomationInvokePattern: {e}"))?;
+    unsafe { pattern.Invoke() }.map_err(|e| format!("Invoke: {e}"))?;
+
+    // Echo the name actually invoked: the match may have been loose, and the
+    // caller must be able to see that it hit "Enregistrer sous..." when it
+    // asked for "Enregistrer".
+    Ok(json!({ "invoked": actual }))
+}
+
+/// Fetch a UIA pattern, telling "this element does not support it" apart from
+/// a genuine COM failure.
+///
+/// `GetCurrentPattern` succeeds and hands back a NULL interface pointer when
+/// the element simply does not implement the pattern. windows-rs turns that
+/// null into `Err(Error::from_win32())`, which reads `GetLastError()` — and
+/// since nothing failed, the code it carries is ERROR_SUCCESS. Callers were
+/// therefore reporting the self-contradictory
+/// `GetCurrentPattern(Value): L'opération a réussi. (0x00000000)`, which told
+/// the assistant nothing and sent it looping: LibreOffice's Document element
+/// does not implement ValuePattern, and that is a fact to act on (type with the
+/// keyboard instead), not an error to retry.
+///
+/// An HRESULT that `is_ok()` is exactly that null-pointer case, so it is the
+/// discriminator: anything else really did fail.
+fn pattern_of(
+    el: &IUIAutomationElement,
+    pattern_id: windows::Win32::UI::Accessibility::UIA_PATTERN_ID,
+    name: &str,
+) -> Result<windows::core::IUnknown, String> {
+    match unsafe { el.GetCurrentPattern(pattern_id) } {
+        Ok(p) => Ok(p),
+        Err(e) if e.code().is_ok() => Err(format!(
+            "this element does not support the {name} pattern; \
+             act on it another way — keyboard for text (focus-and-type), \
+             a mouse click on its rect for a button"
+        )),
+        Err(e) => Err(format!("GetCurrentPattern({name}): {e}")),
+    }
+}
+
 pub fn invoke_by_id(automation_id: &str) -> Result<(), String> {
     let el = find_by_automation_id(automation_id)?;
     // UIA_InvokePatternId = 10000
-    let pattern: IUIAutomationInvokePattern = unsafe {
-        el.GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_InvokePatternId)
-    }
-    .map_err(|e| format!("GetCurrentPattern(Invoke): {e}"))?
-    .cast()
-    .map_err(|e| format!("cast to IUIAutomationInvokePattern: {e}"))?;
+    let pattern: IUIAutomationInvokePattern =
+        pattern_of(&el, windows::Win32::UI::Accessibility::UIA_InvokePatternId, "Invoke")?
+            .cast()
+            .map_err(|e| format!("cast to IUIAutomationInvokePattern: {e}"))?;
     unsafe { pattern.Invoke() }.map_err(|e| format!("Invoke: {e}"))?;
     Ok(())
 }
@@ -473,12 +730,10 @@ pub fn invoke_by_id(automation_id: &str) -> Result<(), String> {
 pub fn set_text_by_id(automation_id: &str, value: &str) -> Result<(), String> {
     let el = find_by_automation_id(automation_id)?;
     // UIA_ValuePatternId = 10002
-    let pattern: IUIAutomationValuePattern = unsafe {
-        el.GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_ValuePatternId)
-    }
-    .map_err(|e| format!("GetCurrentPattern(Value): {e}"))?
-    .cast()
-    .map_err(|e| format!("cast to IUIAutomationValuePattern: {e}"))?;
+    let pattern: IUIAutomationValuePattern =
+        pattern_of(&el, windows::Win32::UI::Accessibility::UIA_ValuePatternId, "Value")?
+            .cast()
+            .map_err(|e| format!("cast to IUIAutomationValuePattern: {e}"))?;
     unsafe { pattern.SetValue(&BSTR::from(value)) }
         .map_err(|e| format!("ValuePattern.SetValue: {e}"))?;
     Ok(())
@@ -521,12 +776,12 @@ pub fn select_by_id(automation_id: &str, value: &str) -> Result<(), String> {
             .unwrap_or_default();
         if name.eq_ignore_ascii_case(value) {
             // UIA_SelectionItemPatternId = 10010
-            let pat: IUIAutomationSelectionItemPattern = unsafe {
-                item.GetCurrentPattern(
-                    windows::Win32::UI::Accessibility::UIA_SelectionItemPatternId,
-                )
-            }
-            .map_err(|e| format!("GetCurrentPattern(SelectionItem) on '{name}': {e}"))?
+            let pat: IUIAutomationSelectionItemPattern = pattern_of(
+                &item,
+                windows::Win32::UI::Accessibility::UIA_SelectionItemPatternId,
+                "SelectionItem",
+            )
+            .map_err(|e| format!("{e} (on '{name}')"))?
             .cast()
             .map_err(|e| format!("cast to SelectionItem: {e}"))?;
             unsafe { pat.Select() }.map_err(|e| format!("SelectionItem.Select: {e}"))?;
@@ -614,7 +869,22 @@ pub fn find_hwnd_by_title(title: &str) -> Result<HWND, String> {
     // same worker thread.
     SEARCH.with(|s| *s.borrow_mut() = None);
 
-    result.map_err(|e| format!("EnumWindows: {e}"))?;
+    // A FALSE return from EnumWindows is not an error here: our callback
+    // returns FALSE on purpose, to stop the walk as soon as it has a match.
+    // windows-rs turns that FALSE into Err(Error::from_win32()), and since
+    // nothing actually failed the code it carries is ERROR_SUCCESS — hence the
+    // self-contradictory "EnumWindows: L'opération a réussi. (0x00000000)"
+    // that every substring lookup used to report. Exact-title lookups were
+    // spared only because FindWindowW answers before we ever get here, which
+    // is why "OpenCode" worked and "LibreOffice Writer" — a substring of
+    // "Sans nom 1 — LibreOffice Writer" — never did.
+    //
+    // So the result is only worth inspecting when we came back empty-handed:
+    // that is the one case where FALSE may mean a real failure rather than a
+    // deliberate early stop.
+    if found.is_none() {
+        result.map_err(|e| format!("EnumWindows: {e}"))?;
+    }
     found.ok_or_else(|| format!("no window with title containing '{title}'"))
 }
 
@@ -771,6 +1041,80 @@ fn send_key(vk: VIRTUAL_KEY, key_up: bool) {
     unsafe {
         let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+/// Send one UTF-16 code unit as a synthetic key press, character by character.
+///
+/// `KEYEVENTF_UNICODE` bypasses the keyboard layout entirely: the scan code
+/// carries the character itself, so accents and symbols land the same way on
+/// AZERTY, QWERTY or anything else. Surrogate pairs work because each unit is
+/// sent on its own, which is what Windows expects.
+fn send_unicode(unit: u16) {
+    for key_up in [false, true] {
+        let flags = if key_up {
+            KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        } else {
+            KEYEVENTF_UNICODE
+        };
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        unsafe {
+            let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+}
+
+/// Type a string into whatever currently has keyboard focus. Returns the
+/// number of UTF-16 units sent.
+pub fn type_text(text: &str) -> usize {
+    let mut sent = 0usize;
+    for unit in text.encode_utf16() {
+        send_unicode(unit);
+        sent += 1;
+    }
+    sent
+}
+
+/// Focus a window and type into it, in one call and on one thread.
+///
+/// This exists because splitting the two across processes cannot be made
+/// reliable. Windows ties the foreground and the input queue to a thread:
+/// `AttachThreadInput` only lends the calling thread the right to redirect
+/// focus, and only for as long as it holds it. When focus came from pc-agent
+/// and the keystrokes came from a second process a moment later, nothing tied
+/// the two together — and the text landed in whichever window really had the
+/// foreground. Doing both here, synchronously, is what makes the guarantee
+/// meaningful.
+///
+/// `focus_window` now fails loudly when the focus is refused, so this returns
+/// an error rather than typing into the wrong application. The reply carries
+/// what the caller needs to decide what to do next, without a second round
+/// trip: the window it typed into, and how much it sent.
+pub fn focus_and_type(hwnd: HWND, text: &str) -> Result<Value, String> {
+    focus_window(hwnd)?;
+
+    let sent = type_text(text);
+    let foreground = unsafe { GetForegroundWindow() };
+
+    Ok(json!({
+        "hwnd": hwnd.0 as u64,
+        "title": window_title(hwnd),
+        "units_sent": sent,
+        // Re-read after typing: a window can lose the foreground mid-sequence
+        // (a notification, another app stealing it), and the caller should be
+        // told rather than left to assume the whole string landed.
+        "still_foreground": foreground.0 as u64 == hwnd.0 as u64,
+    }))
 }
 
 fn parse_modifier(s: &str) -> Result<VIRTUAL_KEY, String> {
