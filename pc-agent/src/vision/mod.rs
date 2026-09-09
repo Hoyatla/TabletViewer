@@ -39,6 +39,7 @@ pub mod track;
 pub mod yolox;
 pub mod yunet;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,6 +48,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use self::track::{ByteTracker, TrackEventKind};
 use self::yolox::YoloX;
 
 /// What we return for one detected object. Box is in original image coords.
@@ -148,19 +150,30 @@ impl VisionEngine {
                 if d.class_id != coco::PERSON { continue; }
                 // YuNet works best on a crop with some padding.
                 let crop = crop_with_padding(rgb, width, height, d, 0.15);
-                if let Ok(Some(face)) = yunet.detect(&crop.rgb, crop.width, crop.height) {
-                    // Map face box back to original image coords.
-                    let fx = face.x + crop.offset_x as f32;
-                    let fy = face.y + crop.offset_y as f32;
-                    let mut landmarks = face.landmarks;
-                    for lm in &mut landmarks {
-                        lm[0] += crop.offset_x as f32;
-                        lm[1] += crop.offset_y as f32;
+                match yunet.detect(&crop.rgb, crop.width, crop.height) {
+                    Ok(found) if !found.is_empty() => {
+                        // Take the highest-scoring face in the crop. The
+                        // person box is small enough that one face is
+                        // the common case; if the user has multiple
+                        // faces in one person box (unlikely at typical
+                        // YOLOX resolutions), we just keep the best.
+                        let best = found.into_iter()
+                            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+                            .unwrap();
+                        // Map face box back to original image coords.
+                        let fx = best.x + crop.offset_x as f32;
+                        let fy = best.y + crop.offset_y as f32;
+                        let mut landmarks = best.landmarks;
+                        for lm in &mut landmarks {
+                            lm[0] += crop.offset_x as f32;
+                            lm[1] += crop.offset_y as f32;
+                        }
+                        faces[i] = Some(Face {
+                            x: fx, y: fy, width: best.width, height: best.height,
+                            score: best.score, landmarks,
+                        });
                     }
-                    faces[i] = Some(Face {
-                        x: fx, y: fy, width: face.width, height: face.height,
-                        score: face.score, landmarks,
-                    });
+                    _ => { /* no face in this person box, or model error */ }
                 }
             }
         }
@@ -208,10 +221,124 @@ impl VisionEngine {
         *guard = Some(Arc::clone(&y));
         Ok(y)
     }
+
+    /// Run ByteTrack across a sequence of frames. Each call creates a
+    /// fresh tracker — useful for batch jobs (POST /v1/detect/video).
+    /// For continuous streams, the caller should own the tracker
+    /// (added in a follow-up WebSocket endpoint).
+    pub fn detect_video(
+        self: &Arc<Self>,
+        frames: &[(Vec<u8>, u32, u32)],
+        detect_faces: bool,
+    ) -> Result<VideoResult> {
+        let mut tracker = ByteTracker::default();
+        let mut frame_results: Vec<FrameResult> = Vec::with_capacity(frames.len());
+        let mut events: Vec<TrackEventOut> = Vec::new();
+
+        let names: HashMap<usize, &'static str> = coco::CLASSES
+            .iter().enumerate().map(|(i, s)| (i, *s)).collect();
+
+        for (frame_idx, (rgb, w, h)) in frames.iter().enumerate() {
+            // YOLOX on this frame.
+            let yolox = self.get_or_load_yolox()?;
+            let dets = yolox.detect(rgb, *w, *h)?;
+
+            // Update tracker. We get the per-detection track_id back.
+            let track_ids = tracker.update(&dets, &names);
+
+            // Optional face detection per person box. Same as detect_frame.
+            let mut faces: Vec<Option<Face>> = vec![None; dets.len()];
+            if detect_faces && dets.iter().any(|d| d.class_id == coco::PERSON) {
+                let yunet = self.get_or_load_yunet()?;
+                for (i, d) in dets.iter().enumerate() {
+                    if d.class_id != coco::PERSON { continue; }
+                    let crop = crop_with_padding(rgb, *w, *h, d, 0.15);
+                    if let Ok(found) = yunet.detect(&crop.rgb, crop.width, crop.height) {
+                        if let Some(best) = found.into_iter()
+                            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+                        {
+                            let fx = best.x + crop.offset_x as f32;
+                            let fy = best.y + crop.offset_y as f32;
+                            let mut landmarks = best.landmarks;
+                            for lm in &mut landmarks {
+                                lm[0] += crop.offset_x as f32;
+                                lm[1] += crop.offset_y as f32;
+                            }
+                            faces[i] = Some(Face {
+                                x: fx, y: fy, width: best.width, height: best.height,
+                                score: best.score, landmarks,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Surface tracker events (Appeared / Continued / Disappeared)
+            // for this frame. We compute events from the per-detection
+            // track_ids and the per-frame last_events list.
+            for (i, det) in dets.iter().enumerate() {
+                if let Some(tid) = track_ids[i] {
+                    let kind = if let Some((_, k)) = tracker.last_events().iter()
+                        .find(|(id, _)| *id == tid)
+                    {
+                        *k
+                    } else {
+                        TrackEventKind::Continued
+                    };
+                    events.push(TrackEventOut {
+                        frame_idx,
+                        track_id: tid,
+                        class_id: det.class_id,
+                        class_name: det.class_name.clone(),
+                        kind: match kind {
+                            TrackEventKind::Appeared => "appeared".to_string(),
+                            TrackEventKind::Continued => "continued".to_string(),
+                            TrackEventKind::Disappeared => "disappeared".to_string(),
+                        },
+                        x: det.x, y: det.y, width: det.width, height: det.height,
+                    });
+                }
+            }
+
+            frame_results.push(FrameResult {
+                detections: dets,
+                faces,
+                elapsed_ms: 0, // could time this if needed
+            });
+        }
+
+        let total_tracks = tracker.tracks().len();
+        Ok(VideoResult {
+            frames: frame_results,
+            events,
+            total_tracks,
+        })
+    }
 }
 
-/// Crop a region of an RGB image with relative padding. Returns the crop
-/// and its offset in the original image.
+/// One tracking event emitted by [`VisionEngine::detect_video`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackEventOut {
+    pub frame_idx: usize,
+    pub track_id: u64,
+    pub class_id: usize,
+    pub class_name: String,
+    /// "appeared" | "continued" | "disappeared"
+    pub kind: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Result of [`VisionEngine::detect_video`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoResult {
+    pub frames: Vec<FrameResult>,
+    pub events: Vec<TrackEventOut>,
+    /// Number of tracks still alive at the end of the sequence.
+    pub total_tracks: usize,
+}
 struct Crop {
     rgb: Vec<u8>,
     width: u32,

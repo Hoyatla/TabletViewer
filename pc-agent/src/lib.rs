@@ -74,7 +74,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/processes", get(handlers::processes))
         .route("/v1/log", get(handlers::log_tail))
         .route("/v1/file", get(handlers::file_read))
-        .route("/v1/detect/frame", post(handlers_vision::detect_frame));
+        .route("/v1/detect/frame", post(handlers_vision::detect_frame))
+        .route("/v1/detect/video", post(handlers_vision::detect_video));
 
     #[cfg(windows)]
     let router = router
