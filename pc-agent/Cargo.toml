@@ -49,6 +49,16 @@ parking_lot = "0.12"
 mdns-sd = "0.11"
 hostname = "0.4"
 
+# ----- Vision pipeline (YOLOX-Nano, YuNet, ByteTrack) -----
+# Pure-Rust ONNX inference via `tract`. We use tract instead of `ort`
+# (ONNX Runtime) for one reason: ort ships prebuilt native binaries
+# only for msvc/x86_64-pc-windows, and this project builds against
+# the gnu toolchain (no VS Build Tools installed). `tract` is pure
+# Rust, no native deps, slightly slower than ort but plenty fast for
+# YOLOX-Nano at 640x640 (~50 ms/frame CPU).
+tract-onnx = "0.21"
+ndarray = "0.15"
+
 # mDNS service discovery is left out for now. We rely on manual IP entry
 # on the tablet. To re-enable, add `libmdns` to deps and uncomment the
 # feature block below.

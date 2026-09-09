@@ -7,7 +7,9 @@
 pub mod capture;
 pub mod discovery;
 pub mod handlers;
+pub mod handlers_vision;
 pub mod proc;
+pub mod vision;
 
 #[cfg(windows)]
 pub mod uia;
@@ -57,6 +59,9 @@ pub struct AppState {
     pub sys: Arc<parking_lot::Mutex<System>>,
     /// Cached screenshotter — initialized once.
     pub capturer: Arc<capture::Capturer>,
+    /// Vision engine: lazy-loads YOLOX-Nano / YuNet on first use.
+    /// Cheap to clone (Arc inside).
+    pub vision: Arc<vision::VisionEngine>,
 }
 
 /// Build the HTTP router with all routes wired. Public so integration
@@ -68,7 +73,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/screenshot", get(handlers::screenshot))
         .route("/v1/processes", get(handlers::processes))
         .route("/v1/log", get(handlers::log_tail))
-        .route("/v1/file", get(handlers::file_read));
+        .route("/v1/file", get(handlers::file_read))
+        .route("/v1/detect/frame", post(handlers_vision::detect_frame));
 
     #[cfg(windows)]
     let router = router
@@ -118,11 +124,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 
     let capturer = capture::Capturer::new().context("init screenshot capture")?;
     let sys = System::new_all();
+    let vision = Arc::new(vision::VisionEngine::with_default_root());
     let state = AppState {
         token,
         allowed_roots,
         sys: Arc::new(parking_lot::Mutex::new(sys)),
         capturer: Arc::new(capturer),
+        vision,
     };
     let app = build_router(state);
 

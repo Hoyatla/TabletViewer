@@ -1,0 +1,22 @@
+{
+  "id": "yolox-nano",
+  "nom": "YOLOX-Nano (COCO 80)",
+  "moteur": "onnxruntime",
+  "espace": "Vision",
+  "racine": "vision",
+  "fichiers": { "poids": "model.onnx" },
+  "taille_mo": 4,
+  "vram_mo": 250,
+  "params_backend": "cpu",
+  "produit": "detections",
+  "licence": "Apache-2.0",
+  "url_poids": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx",
+  "_notes": [
+    "YOLOX-Nano d'origine : https://github.com/Megvii-BaseDetection/YOLOX",
+    "Poids d'origine distribues par Megvii (Apache 2.0).",
+    "Le binaire ONNX exporte a une entree 'images' (1, 3, 640, 640) float32 [0,1]",
+    "et une sortie (1, 8400, 85) : [cx, cy, w, h, obj, 80 classes].",
+    "Pour la version fine-tune 'personnes + animaux uniquement' on peut convertir",
+    "YOLOX-Nano standard ; on garde 80 classes COCO par defaut."
+  ]
+}
